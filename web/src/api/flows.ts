@@ -77,6 +77,17 @@ export function generateFlow(prompt: string) {
   return request<Flow>('POST', '/flows/generate', { prompt });
 }
 
+export type FlowPlan = {
+  name: string;
+  description: string;
+  graph: FlowGraph;
+};
+
+/** Drafts a workflow for review; it is not persisted until createFlow(). */
+export function planFlow(prompt: string) {
+  return request<FlowPlan>('POST', '/flows/plan', { prompt });
+}
+
 export function updateFlow(id: number, body: { name?: string; description?: string; graph?: FlowGraph }) {
   return request<Flow>('PUT', `/flows/${id}`, body);
 }

@@ -21,7 +21,8 @@ import {
 import {
   createFlow,
   deleteFlow,
-  generateFlow,
+  planFlow,
+  type FlowPlan,
   listFlows,
   runFlow,
   toggleFlow,
@@ -399,8 +400,16 @@ function TemplateStrip({
   };
 
   return (
-    <div className="mb-5 grid grid-cols-1 gap-3 lg:grid-cols-4">
-      {FLOW_TEMPLATES.map((tpl) => {
+    <section className="mb-5">
+      <div className="mb-3 flex items-end justify-between">
+        <div>
+          <h2 className="text-sm font-semibold text-zinc-100">模板中心</h2>
+          <p className="mt-1 text-xs text-zinc-500">从成熟的安全运维场景开始，参数化后生成自己的工作流。</p>
+        </div>
+        <span className="text-[11px] text-zinc-600">{FLOW_TEMPLATES.length} 个内置模板</span>
+      </div>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
+        {FLOW_TEMPLATES.map((tpl) => {
         const Icon = templateIcon(tpl.kind);
         return (
           <Card key={tpl.key} compact className="flex flex-col gap-3">
@@ -429,8 +438,9 @@ function TemplateStrip({
             </Button>
           </Card>
         );
-      })}
-    </div>
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -522,22 +532,36 @@ function CreateFlowModal({
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [draft, setDraft] = useState<FlowPlan | null>(null);
   if (!open) return null;
 
-  const canSubmit = mode === 'ai' ? prompt.trim().length >= 5 : name.trim().length > 0;
+  const canSubmit = mode === 'ai' ? (draft !== null || prompt.trim().length >= 5) : name.trim().length > 0;
   const submit = async () => {
     if (!canSubmit) return;
     setBusy(true);
     setErr('');
     try {
       const f = mode === 'ai'
-        ? await generateFlow(prompt.trim())
+        ? await createFlow({ name: draft!.name, description: draft!.description, graph: draft!.graph })
         : await createFlow({
             name: name.trim(),
             description: '[类型:手动] 空白工作流，可在编辑器中添加触发、Agent、Skill 和通知节点。',
             graph: { nodes: [{ id: 'manual', type: 'trigger.manual', name: '手动触发', position: { x: 80, y: 160 } }], edges: [] },
           });
       onCreated(f.id);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createPlan = async () => {
+    if (prompt.trim().length < 5 || busy) return;
+    setBusy(true);
+    setErr('');
+    try {
+      setDraft(await planFlow(prompt.trim()));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -553,9 +577,9 @@ function CreateFlowModal({
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>取消</Button>
-          <Button variant="primary" onClick={() => void submit()} disabled={!canSubmit || busy}>
-            {busy ? <Loader2 size={12} className="animate-spin" /> : mode === 'ai' ? <Sparkles size={12} /> : <Plus size={12} />}
-            {busy ? '处理中...' : mode === 'ai' ? 'AI 生成' : '创建'}
+          <Button variant="primary" onClick={() => void (mode === 'ai' && !draft ? createPlan() : submit())} disabled={!canSubmit || busy}>
+            {busy ? <Loader2 size={12} className="animate-spin" /> : mode === 'ai' && !draft ? <Sparkles size={12} /> : <Plus size={12} />}
+            {busy ? '处理中...' : mode === 'ai' && !draft ? '生成草稿' : mode === 'ai' ? '确认创建' : '创建'}
           </Button>
         </>
       }
@@ -564,14 +588,14 @@ function CreateFlowModal({
         <div className="inline-flex rounded-md border border-zinc-800 p-0.5 text-xs">
           <button
             type="button"
-            onClick={() => setMode('ai')}
+            onClick={() => { setMode('ai'); setDraft(null); }}
             className={cn('rounded px-3 py-1 transition-colors', mode === 'ai' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}
           >
             AI 生成
           </button>
           <button
             type="button"
-            onClick={() => setMode('blank')}
+            onClick={() => { setMode('blank'); setDraft(null); }}
             className={cn('rounded px-3 py-1 transition-colors', mode === 'blank' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}
           >
             空白画布
@@ -579,15 +603,32 @@ function CreateFlowModal({
         </div>
         {mode === 'ai' ? (
           <label className="block">
-            <span className="mb-1 block text-[11px] text-zinc-400">用一句话描述安全运维流程，AI 会生成可编辑的节点图。</span>
+            <span className="mb-1 block text-[11px] text-zinc-400">描述目标，Planner 会先生成可审查的工作流草稿。</span>
             <textarea
               autoFocus
               value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
+              onChange={(e) => { setPrompt(e.target.value); setDraft(null); }}
               rows={4}
-              placeholder="例如：告警触发后让 RCA Agent 调查，若建议重启服务则进入人工确认，再生成 RCA 报告。"
+              placeholder="例如：检查设备 5 的 Docker 容器，发现异常后生成 RCA 报告，不执行修改操作。"
               className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[13px] text-zinc-200 outline-none focus:border-zinc-600"
             />
+            {draft && (
+              <div className="mt-3 rounded-md border border-indigo-500/30 bg-indigo-500/5 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium text-indigo-200">
+                  <ShieldCheck size={14} />
+                  草稿预览：{draft.name}
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">{draft.description || '已通过基础图结构校验，创建后仍可在画布中调整。'}</p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {draft.graph.nodes.map((node) => (
+                    <span key={node.id} className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300">
+                      {node.name || node.type}
+                    </span>
+                  ))}
+                </div>
+                <button type="button" onClick={() => setDraft(null)} className="mt-2 text-[11px] text-zinc-500 hover:text-zinc-300">重新生成</button>
+              </div>
+            )}
           </label>
         ) : (
           <label className="block">

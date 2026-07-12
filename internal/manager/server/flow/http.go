@@ -33,6 +33,7 @@ func NewHandler(uc *bizflow.Usecase) *Handler { return &Handler{uc: uc} }
 func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/flows", h.list)
 	r.With(h.requireWriter).Post("/v1/flows", h.create)
+	r.With(h.requireWriter).Post("/v1/flows/plan", h.plan)
 	r.With(h.requireWriter).Post("/v1/flows/generate", h.generate)
 	r.Get("/v1/flows/{id}", h.get)
 	r.With(h.requireWriter).Put("/v1/flows/{id}", h.update)
@@ -228,6 +229,33 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, toFlowDTO(f, true))
+}
+
+// plan drafts a workflow without persisting it. The caller can review the
+// generated graph and explicitly create the workflow afterwards.
+func (h *Handler) plan(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
+		writeErr(w, errors.Join(errs.ErrInvalid, err))
+		return
+	}
+	draft, err := h.uc.GenerateGraph(r.Context(), in.Prompt)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var graph any
+	if err := json.Unmarshal([]byte(draft.GraphJSON), &graph); err != nil {
+		writeErr(w, errors.Join(errs.ErrInvalid, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":        draft.Name,
+		"description": draft.Description,
+		"graph":       graph,
+	})
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
