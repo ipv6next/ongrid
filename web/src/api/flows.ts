@@ -81,6 +81,24 @@ export type FlowPlan = {
   name: string;
   description: string;
   graph: FlowGraph;
+  intent?: string;
+  mode?: 'template' | 'planner';
+  template_key?: string;
+  steps?: Array<{
+    title: string;
+    node_type: string;
+    persona?: string;
+    tool?: string;
+    description: string;
+  }>;
+  required_inputs?: Array<{
+    key: string;
+    label: string;
+    required: boolean;
+    reason: string;
+  }>;
+  risks?: Array<{ level: string; message: string }>;
+  warnings?: string[];
 };
 
 /** Drafts a workflow for review; it is not persisted until createFlow(). */

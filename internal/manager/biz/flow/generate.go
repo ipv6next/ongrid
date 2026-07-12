@@ -109,6 +109,7 @@ func genSystemPrompt(tools []ToolMeta) string {
 
 ## 可用工具（tool 节点的 tool 名 + 必填参数；只能用这里的名字）
 `)
+	b.WriteString(plannerGuardrails())
 	for _, t := range tools {
 		desc := t.DescriptionZh
 		if desc == "" {
@@ -130,6 +131,20 @@ func genSystemPrompt(tools []ToolMeta) string {
 
 只输出 JSON。工具名必须用上面列出的，参数符合其 schema。`)
 	return b.String()
+}
+
+func plannerGuardrails() string {
+	return `
+## Intelligent orchestration guardrails
+- First identify the operational intent, target device or incident, whether the request is read-only, and whether a report is required.
+- Available expert personas: incident-investigator (incident RCA), specialist-sre (service reliability), specialist-network (network), specialist-disk (filesystem), specialist-compute (CPU/memory), specialist-ops (host operations), specialist-container (Docker/container), reviewer (high-risk review), reporter (report writing).
+- Docker/container requests MUST use an agent node with persona "specialist-container". Never represent an operations expert as an llm node. An llm node may only summarize the agent's factual output afterwards.
+- Agent instructions that target a host MUST refer to the runtime input {{trigger.device_id}}. Do not hard-code a customer device id in a generated workflow.
+- A direct host_bash tool call MUST use device_ids (an array), not device_id.
+- Read-only diagnosis is the default. Do not generate restart, stop, delete, update, or other mutating actions unless explicitly requested; such actions must route through reviewer / human confirmation.
+- If the request is ambiguous, produce a conservative read-only investigation workflow and list the missing detail in the description.
+
+`
 }
 
 func requiredParams(schema json.RawMessage) []string {

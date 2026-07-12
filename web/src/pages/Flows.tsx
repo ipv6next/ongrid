@@ -616,16 +616,28 @@ function CreateFlowModal({
               <div className="mt-3 rounded-md border border-indigo-500/30 bg-indigo-500/5 p-3">
                 <div className="flex items-center gap-2 text-xs font-medium text-indigo-200">
                   <ShieldCheck size={14} />
-                  草稿预览：{draft.name}
+                  智能编排草稿：{draft.name}
                 </div>
-                <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">{draft.description || '已通过基础图结构校验，创建后仍可在画布中调整。'}</p>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {draft.graph.nodes.map((node) => (
-                    <span key={node.id} className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-zinc-300">
-                      {node.name || node.type}
-                    </span>
+                <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">{draft.intent || draft.description || '已通过基础图结构校验，创建后仍可在画布中调整。'}</p>
+                {draft.mode === 'template' && (
+                  <div className="mt-2 rounded border border-emerald-500/20 bg-emerald-500/5 px-2 py-1 text-[10px] text-emerald-200">已命中受控场景模板，使用平台预置的专家和安全约束。</div>
+                )}
+                <div className="mt-2 space-y-1.5">
+                  {(draft.steps?.length ? draft.steps : draft.graph.nodes.map((node) => ({ title: node.name || node.type, node_type: node.type, description: '', persona: undefined, tool: undefined }))).map((step, index) => (
+                    <div key={`${step.title}-${index}`} className="flex items-center gap-1.5 text-[10px] text-zinc-300">
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-zinc-500">{index + 1}</span>
+                      <span>{step.title}</span>
+                      {step.persona && <span className="rounded bg-indigo-500/10 px-1 text-indigo-200">{step.persona}</span>}
+                      {step.tool && <span className="rounded bg-zinc-800 px-1 text-zinc-400">{step.tool}</span>}
+                    </div>
                   ))}
                 </div>
+                {!!draft.required_inputs?.length && <div className="mt-2 text-[10px] text-zinc-400">运行时需要：{draft.required_inputs.map((input) => input.label).join('、')}</div>}
+                {!!draft.risks?.length && (
+                  <div className="mt-2 space-y-1 rounded border border-amber-500/20 bg-amber-500/5 p-2 text-[10px] text-amber-100">
+                    {draft.risks.map((risk, index) => <div key={`${risk.level}-${index}`} className="flex gap-1"><AlertTriangle size={12} className="mt-0.5 shrink-0" />{risk.message}</div>)}
+                  </div>
+                )}
                 <button type="button" onClick={() => setDraft(null)} className="mt-2 text-[11px] text-zinc-500 hover:text-zinc-300">重新生成</button>
               </div>
             )}

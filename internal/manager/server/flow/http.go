@@ -241,7 +241,7 @@ func (h *Handler) plan(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errors.Join(errs.ErrInvalid, err))
 		return
 	}
-	draft, err := h.uc.GenerateGraph(r.Context(), in.Prompt)
+	draft, err := h.uc.PlanWorkflow(r.Context(), in.Prompt)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -252,9 +252,16 @@ func (h *Handler) plan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":        draft.Name,
-		"description": draft.Description,
-		"graph":       graph,
+		"name":            draft.Name,
+		"description":     draft.Description,
+		"graph":           graph,
+		"intent":          draft.Intent,
+		"mode":            draft.Mode,
+		"template_key":    draft.TemplateKey,
+		"steps":           draft.Steps,
+		"required_inputs": draft.RequiredInputs,
+		"risks":           draft.Risks,
+		"warnings":        draft.Warnings,
 	})
 }
 
