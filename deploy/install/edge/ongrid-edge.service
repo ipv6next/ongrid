@@ -49,6 +49,11 @@ PrivateTmp=true
 # no-op on < 232 where the sandbox itself is off.
 StateDirectory=ongrid-edge
 StateDirectoryMode=0755
+# LogsDirectory is created by systemd before it builds the private mount
+# namespace. This matters on hosts where /var/log is volatile or the log
+# directory was removed between boots; ReadWritePaths alone cannot create it.
+LogsDirectory=ongrid-edge
+LogsDirectoryMode=0750
 ReadWritePaths=/var/lib/ongrid-edge /var/log/ongrid-edge
 StandardOutput=journal
 StandardError=journal

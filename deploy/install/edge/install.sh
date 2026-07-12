@@ -337,6 +337,10 @@ PrivateTmp=true
 # explicitly so writability never depends on StateDirectory= taking effect.
 StateDirectory=ongrid-edge
 StateDirectoryMode=0755
+# Let systemd create the log directory before namespace setup. This keeps
+# reboot safe even when /var/log is volatile or the directory was removed.
+LogsDirectory=ongrid-edge
+LogsDirectoryMode=0750
 ReadWritePaths=/var/lib/ongrid-edge /var/log/ongrid-edge
 StandardOutput=journal
 StandardError=journal
