@@ -97,6 +97,7 @@ export type FlowRun = {
   flow_version: number;
   status: 'pending' | 'running' | 'succeeded' | 'failed' | 'canceled';
   trigger_type: string;
+  trigger?: Record<string, unknown>;
   error?: string;
   started_at?: string;
   finished_at?: string;

@@ -39,6 +39,9 @@ const (
 	// this only during a user-initiated save; the normal plugin config
 	// snapshot still carries only non-secret metadata.
 	MethodWriteDatabaseMetricsSecret = "write_database_metrics_secret"
+	// MethodSecurityPolicy manages the small, server-defined command-policy
+	// preset set. The edge never accepts arbitrary YAML over the tunnel.
+	MethodSecurityPolicy = "security_policy"
 
 	// WebSSH (manager → edge): edge agent acts as an SSH client into
 	// the host's local sshd. Each browser session is identified by a
@@ -78,6 +81,19 @@ const (
 	// agent_version on next register".
 	MethodApplyPackage = "apply_package"
 )
+
+type SecurityPolicyRequest struct {
+	Action  string `json:"action"` // get | apply
+	Preset  string `json:"preset"`
+	Enabled bool   `json:"enabled"`
+}
+
+type SecurityPolicyResponse struct {
+	Preset          string `json:"preset"`
+	Enabled         bool   `json:"enabled"`
+	DockerAvailable bool   `json:"docker_available"`
+	AppliedAt       string `json:"applied_at,omitempty"`
+}
 
 // ---------------------------------------------------------------------
 // webssh

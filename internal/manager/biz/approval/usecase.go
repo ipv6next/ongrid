@@ -39,7 +39,10 @@ type Usecase struct {
 	repo      Repo
 	log       *slog.Logger
 	executors map[string]Executor
+	observer  DecisionObserver
 }
+
+type DecisionObserver func(ctx context.Context, approval *model.Approval)
 
 // NewUsecase wires the repo.
 func NewUsecase(repo Repo, log *slog.Logger) *Usecase {
@@ -55,15 +58,23 @@ func (u *Usecase) RegisterExecutor(kind string, fn Executor) {
 	u.executors[kind] = fn
 }
 
+func (u *Usecase) RegisterDecisionObserver(fn DecisionObserver) { u.observer = fn }
+
 // ProposeInput is what a producer queues.
 type ProposeInput struct {
-	Kind       string
-	Title      string
-	Summary    string
-	Payload    any    // marshaled to PayloadJSON
-	Source     string // SourceAgent / SourceFlow
-	SessionID  string
-	ProposedBy uint64
+	Kind           string
+	Title          string
+	Summary        string
+	Payload        any    // marshaled to PayloadJSON
+	Source         string // SourceAgent / SourceFlow
+	SessionID      string
+	ProposedBy     uint64
+	IncidentID     uint64
+	SourceType     string
+	RiskLevel      string
+	ActionType     string
+	Recommendation string
+	Prerequisites  any
 }
 
 // Propose records a pending action. Producer-facing (not admin-gated — the
@@ -80,10 +91,32 @@ func (u *Usecase) Propose(ctx context.Context, in ProposeInput) (*model.Approval
 	if src == "" {
 		src = model.SourceAgent
 	}
+	prerequisites, err := json.Marshal(in.Prerequisites)
+	if err != nil {
+		return nil, err
+	}
+	if string(prerequisites) == "null" {
+		prerequisites = []byte("[]")
+	}
+	sourceType := strings.TrimSpace(in.SourceType)
+	if sourceType == "" {
+		sourceType = src
+	}
+	risk := strings.ToLower(strings.TrimSpace(in.RiskLevel))
+	if risk == "" {
+		risk = "medium"
+	}
+	actionType := strings.ToLower(strings.TrimSpace(in.ActionType))
+	if actionType == "" {
+		actionType = "manual"
+	}
 	a := &model.Approval{
 		Kind: in.Kind, Title: in.Title, Summary: in.Summary,
 		PayloadJSON: string(payload), Source: src, SessionID: in.SessionID,
 		Status: model.StatusPending, ProposedBy: in.ProposedBy,
+		IncidentID: in.IncidentID, SourceType: sourceType, RiskLevel: risk,
+		ActionType: actionType, Recommendation: in.Recommendation,
+		PrerequisitesJSON: string(prerequisites),
 	}
 	if err := u.repo.Create(ctx, a); err != nil {
 		return nil, err
@@ -115,9 +148,14 @@ func (u *Usecase) Approve(ctx context.Context, approverID uint64, id string) (*m
 	if err != nil {
 		return nil, err
 	}
+	if a.ActionType == "manual" {
+		u.notify(ctx, a)
+		return a, nil
+	}
 	exec, ok := u.executors[a.Kind]
 	if !ok {
 		u.log.Warn("approved but no executor for kind", slog.String("id", id), slog.String("kind", a.Kind))
+		u.notify(ctx, a)
 		return a, nil
 	}
 	res, runErr := exec(ctx, a.PayloadJSON)
@@ -130,14 +168,26 @@ func (u *Usecase) Approve(ctx context.Context, approverID uint64, id string) (*m
 		u.log.Warn("set approval result failed", slog.String("id", id), slog.Any("err", err))
 	}
 	a, _ = u.repo.Get(ctx, id)
+	u.notify(ctx, a)
 	return a, nil
 }
 
 // Reject marks the proposal rejected with a reason. No execution.
 func (u *Usecase) Reject(ctx context.Context, approverID uint64, id, reason string) error {
 	now := time.Now().UTC()
-	return u.repo.Decide(ctx, id, map[string]any{
+	if err := u.repo.Decide(ctx, id, map[string]any{
 		"status": model.StatusRejected, "approved_by": approverID,
 		"reason": strings.TrimSpace(reason), "decided_at": now,
-	})
+	}); err != nil {
+		return err
+	}
+	a, _ := u.repo.Get(ctx, id)
+	u.notify(ctx, a)
+	return nil
+}
+
+func (u *Usecase) notify(ctx context.Context, a *model.Approval) {
+	if u.observer != nil && a != nil {
+		u.observer(ctx, a)
+	}
 }

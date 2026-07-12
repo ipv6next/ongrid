@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -61,6 +62,7 @@ type Usecase struct {
 	engine  *Engine
 	catalog ToolCatalog
 	llm     GenLLM
+	sinks   ProductSinks
 	log     *slog.Logger
 }
 
@@ -71,6 +73,13 @@ func NewUsecase(repo Repo, runs RunRepo, engine *Engine, log *slog.Logger) *Usec
 		log = slog.Default()
 	}
 	return &Usecase{repo: repo, runs: runs, engine: engine, log: log}
+}
+
+// WithProductSinks wires optional product close-loop integrations. A successful
+// workflow run can then create native RCA, approval and report artifacts.
+func (u *Usecase) WithProductSinks(s ProductSinks) *Usecase {
+	u.sinks = s
+	return u
 }
 
 // CreateInput / UpdateInput are the write payloads.
@@ -303,6 +312,12 @@ func (u *Usecase) triggerRun(ctx context.Context, id uint64, entryType string, i
 	if !hasEntry {
 		return nil, fmt.Errorf("%w: graph has no %s trigger", errs.ErrInvalid, entryType)
 	}
+	if entryType == NodeTriggerManual {
+		input = enrichSuggestedActionContext(f.GraphJSON, input)
+		if missing := missingTriggerFields(f.GraphJSON, input); len(missing) > 0 {
+			return nil, fmt.Errorf("%w: missing required trigger input: %s", errs.ErrInvalid, strings.Join(missing, ", "))
+		}
+	}
 
 	tb, _ := json.Marshal(input)
 	if input == nil {
@@ -338,8 +353,61 @@ func (u *Usecase) triggerRun(ctx context.Context, id uint64, entryType string, i
 		if err := u.runs.UpdateRun(bg, run); err != nil {
 			u.log.Warn("flow run finalize failed", slog.String("run_id", run.ID), slog.Any("err", err))
 		}
+		if status == model.RunStatusSucceeded {
+			if err := u.finalizeProductArtifacts(bg, f, run); err != nil {
+				u.log.Warn("flow product finalizer failed", slog.String("run_id", run.ID), slog.Any("err", err))
+			}
+		}
 	}()
 	return run, nil
+}
+
+var triggerFieldRef = regexp.MustCompile(`\{\{\s*trigger\.([a-zA-Z0-9_]+)[^}]*\}\}`)
+
+func enrichSuggestedActionContext(graphJSON string, input map[string]any) map[string]any {
+	out := make(map[string]any, len(input)+2)
+	for key, value := range input {
+		out[key] = value
+	}
+	refs := map[string]bool{}
+	for _, match := range triggerFieldRef.FindAllStringSubmatch(graphJSON, -1) {
+		refs[match[1]] = true
+	}
+	if refs["action"] {
+		if value, ok := out["action"]; !ok || strings.TrimSpace(fmt.Sprint(value)) == "" {
+			out["action"] = "load the Suggested Action from the incident RCA context"
+		}
+	}
+	if refs["payload"] {
+		if value, ok := out["payload"]; !ok || value == nil || strings.TrimSpace(fmt.Sprint(value)) == "" {
+			out["payload"] = map[string]any{
+				"source":      "incident_rca",
+				"incident_id": out["incident_id"],
+			}
+		}
+	}
+	return out
+}
+
+func missingTriggerFields(graphJSON string, input map[string]any) []string {
+	seen := map[string]bool{}
+	var missing []string
+	for _, match := range triggerFieldRef.FindAllStringSubmatch(graphJSON, -1) {
+		field := match[1]
+		if seen[field] {
+			continue
+		}
+		seen[field] = true
+		value, ok := input[field]
+		empty := !ok || value == nil || fmt.Sprint(value) == ""
+		if field == "incident_id" && fmt.Sprint(value) == "0" {
+			empty = true
+		}
+		if empty {
+			missing = append(missing, field)
+		}
+	}
+	return missing
 }
 
 // GetRun returns a run plus its node rows.

@@ -114,6 +114,33 @@ func (s *Service) GetProcessList(ctx context.Context, edgeID uint64, topN uint32
 	return resp, nil
 }
 
+func (s *Service) GetSecurityPolicy(ctx context.Context, edgeID uint64) (tunnel.SecurityPolicyResponse, error) {
+	return s.securityPolicy(ctx, edgeID, tunnel.SecurityPolicyRequest{Action: "get", Preset: "docker-readonly"})
+}
+
+func (s *Service) ApplySecurityPolicy(ctx context.Context, edgeID uint64, enabled bool) (tunnel.SecurityPolicyResponse, error) {
+	return s.securityPolicy(ctx, edgeID, tunnel.SecurityPolicyRequest{Action: "apply", Preset: "docker-readonly", Enabled: enabled})
+}
+
+func (s *Service) securityPolicy(ctx context.Context, edgeID uint64, req tunnel.SecurityPolicyRequest) (tunnel.SecurityPolicyResponse, error) {
+	if s.caller == nil {
+		return tunnel.SecurityPolicyResponse{}, fmt.Errorf("security policy not wired: no edge caller configured")
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return tunnel.SecurityPolicyResponse{}, fmt.Errorf("security policy: marshal: %w", err)
+	}
+	respBytes, err := s.caller.Call(ctx, edgeID, tunnel.MethodSecurityPolicy, body)
+	if err != nil {
+		return tunnel.SecurityPolicyResponse{}, err
+	}
+	var resp tunnel.SecurityPolicyResponse
+	if err := json.Unmarshal(respBytes, &resp); err != nil {
+		return tunnel.SecurityPolicyResponse{}, fmt.Errorf("security policy: unmarshal response: %w", err)
+	}
+	return resp, nil
+}
+
 // UpgradeAgent dispatches the agent_upgrade RPC to a connected edge.
 // The edge stages the binary at URL after sha256 verification; the
 // actual swap happens on the next process restart via the systemd

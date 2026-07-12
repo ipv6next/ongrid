@@ -30,9 +30,9 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
 
-	bizwebshell "github.com/ongridio/ongrid/internal/manager/biz/webshell"
 	devicebiz "github.com/ongridio/ongrid/internal/manager/biz/device"
 	edgebiz "github.com/ongridio/ongrid/internal/manager/biz/edge"
+	bizwebshell "github.com/ongridio/ongrid/internal/manager/biz/webshell"
 	edgemodel "github.com/ongridio/ongrid/internal/manager/model/edge"
 	wsmodel "github.com/ongridio/ongrid/internal/manager/model/webshell"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
@@ -138,7 +138,7 @@ type openMsg struct {
 	Cols    uint16 `json:"cols"`
 	Rows    uint16 `json:"rows"`
 	Term    string `json:"term,omitempty"`
-	SSHHost string `json:"ssh_host,omitempty"` // future: jumpbox; today ignored (always 127.0.0.1:22)
+	SSHHost string `json:"ssh_host,omitempty"` // future: jumpbox; today must be empty / 127.0.0.1:22
 	SSHUser string `json:"ssh_user"`
 	SSHPass string `json:"ssh_pass"`
 }
@@ -215,6 +215,14 @@ func (h *Handler) openShell(w http.ResponseWriter, r *http.Request) {
 	}
 	if openFrame.SSHUser == "" || openFrame.SSHPass == "" {
 		br.closeWith(websocket.CloseProtocolError, "ssh_user / ssh_pass required")
+		return
+	}
+	if !isSupportedSSHHost(openFrame.SSHHost) {
+		br.sendText(map[string]any{
+			"type":    "auth_error",
+			"message": "custom SSH host/port is not supported yet; use the device local sshd on 127.0.0.1:22",
+		})
+		br.closeWith(websocket.CloseNormalClosure, "unsupported ssh target")
 		return
 	}
 	cols, rows := openFrame.Cols, openFrame.Rows
@@ -580,11 +588,11 @@ type rwcAdapter struct {
 	rwc io.ReadWriteCloser
 }
 
-func (a rwcAdapter) Read(p []byte) (int, error)  { return a.rwc.Read(p) }
-func (a rwcAdapter) Write(p []byte) (int, error) { return a.rwc.Write(p) }
-func (a rwcAdapter) Close() error                { return a.rwc.Close() }
-func (a rwcAdapter) LocalAddr() net.Addr             { return noopAddr{} }
-func (a rwcAdapter) RemoteAddr() net.Addr            { return noopAddr{} }
+func (a rwcAdapter) Read(p []byte) (int, error)       { return a.rwc.Read(p) }
+func (a rwcAdapter) Write(p []byte) (int, error)      { return a.rwc.Write(p) }
+func (a rwcAdapter) Close() error                     { return a.rwc.Close() }
+func (a rwcAdapter) LocalAddr() net.Addr              { return noopAddr{} }
+func (a rwcAdapter) RemoteAddr() net.Addr             { return noopAddr{} }
 func (a rwcAdapter) SetDeadline(time.Time) error      { return nil }
 func (a rwcAdapter) SetReadDeadline(time.Time) error  { return nil }
 func (a rwcAdapter) SetWriteDeadline(time.Time) error { return nil }
@@ -680,4 +688,14 @@ func clientIP(r *http.Request) string {
 
 func writeErr(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), errs.HTTPStatus(err))
+}
+
+func isSupportedSSHHost(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	switch host {
+	case "", "127.0.0.1:22", "localhost:22":
+		return true
+	default:
+		return false
+	}
 }

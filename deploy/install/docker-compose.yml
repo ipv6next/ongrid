@@ -57,6 +57,9 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      frontier:
+        condition: service_started
+        restart: true
     environment:
       ONGRID_HTTP_ADDR: ${ONGRID_HTTP_ADDR:-:8080}
       ONGRID_METRICS_ADDR: ${ONGRID_METRICS_ADDR:-:9100}

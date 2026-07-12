@@ -44,6 +44,7 @@ const ROUTE_DEFS: RouteDef[] = [
   { path: '/alerts/rules', zh: '告警规则', en: 'Alert rules', keywords: ['rules', 'guize'], group: '监控告警' },
 
   { path: '/settings/integrations', zh: '设置 / 集成', en: 'Settings / Integrations', keywords: ['settings', 'integrations', 'shezhi'], group: '设置' },
+  { path: '/settings/datasources', zh: '设置 / 数据源', en: 'Settings / Data Sources', keywords: ['datasource', 'prometheus', 'loki', 'shujuyuan'], group: '设置' },
   { path: '/settings/llm', zh: '设置 / LLM', en: 'Settings / LLM', keywords: ['llm', 'model', 'moxing'], group: '设置' },
   { path: '/settings/notifications', zh: '设置 / 通知', en: 'Settings / Notifications', keywords: ['notifications', 'tongzhi', 'communications'], group: '设置' },
   { path: '/settings/channels', zh: '设置 / 渠道', en: 'Settings / Channels', keywords: ['channels', 'qudao', 'bots', 'im'], group: '设置' },
@@ -59,10 +60,35 @@ const ROUTE_DEFS: RouteDef[] = [
 // reflected on next palette open). `keywords` retain pinyin/synonym
 // hints so fuzzyMatch still works for users who type Chinese acronyms
 // regardless of UI language.
+const PRODUCT_ROUTE_LABELS: Record<string, string> = {
+  '/': '运营总览',
+  '/dashboard': '运营总览',
+  '/assistant': 'AI 助手',
+  '/agents': 'AI 专家',
+  '/skills': '技能工具',
+  '/workflows': '自动化流程',
+  '/knowledge': '知识库',
+  '/devices': '资产管理',
+  '/edges/shell-sessions': 'WebShell',
+  '/topology': '网络拓扑',
+  '/monitor': '指标查询',
+  '/logs': '日志查询',
+  '/traces': '链路追踪',
+  '/alerts': '事件中心',
+  '/alerts/rules': '告警规则',
+  '/settings/datasources': '数据源',
+  '/patrol': '安全巡检',
+  '/approvals': '人工确认',
+  '/reports': '报告中心',
+  '/edge-security': 'Edge 安全策略',
+  '/admin/audit': '审计日志',
+  '/tasks': '任务调度',
+};
+
 export const APP_ROUTES: AppRoute[] = ROUTE_DEFS.map((r) => Object.defineProperty(
   { path: r.path, keywords: r.keywords, group: r.group, label: '' } as AppRoute,
   'label',
-  { get: () => trInline(r.zh, r.en), enumerable: true },
+  { get: () => PRODUCT_ROUTE_LABELS[r.path] ?? trInline(r.zh, r.en), enumerable: true },
 ));
 
 // fuzzyMatchScore returns a non-negative score when `query` matches

@@ -16,7 +16,7 @@ import { queryLogsRange, listLogLabels, type LokiStream } from '@/api/logs';
 import { ApiError } from '@/api/client';
 import { listEdges, type Edge, type EdgeRole } from '@/api/edges';
 import { onDevicesChanged } from '@/lib/events';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { RoleSelect } from '@/components/ui';
 import { NLQueryHelper } from '@/components/NLQueryHelper';
 import { useObservability } from '@/store/observability';
@@ -196,6 +196,8 @@ function streamsToRows(resp: { resultType: string; result: unknown }): LogRow[] 
 
 export default function LogsPage() {
   const { tr } = useI18n();
+  const [searchParams] = useSearchParams();
+  const initialDeviceFilter = searchParams.get('device_id') || searchParams.get('device') || '';
   const [range, setRange] = useState(DEFAULT_RANGE);
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
@@ -206,11 +208,11 @@ export default function LogsPage() {
   // Top-level device / role / filename selectors — they inject label
   // matchers into the effective LogQL just like facet chips do, but
   // live above the LogQL box so common filters don't need typing.
-  const [deviceFilter, setDeviceFilter] = useState(''); // value = device_id (string)
+  const [deviceFilter, setDeviceFilter] = useState(initialDeviceFilter); // value = device_id (string)
   // deviceInput is the literal text in the searchable combobox (display
   // label or raw device_id). Kept separate from deviceFilter so the
   // input doesn't disagree with what the user typed when no edge match.
-  const [deviceInput, setDeviceInput] = useState('');
+  const [deviceInput, setDeviceInput] = useState(initialDeviceFilter);
   const [roleFilter, setRoleFilter] = useState<'' | EdgeRole>('');
   const [filenameFilter, setFilenameFilter] = useState(''); // value = unit OR filename label
   const [edges, setEdges] = useState<Edge[]>([]);

@@ -49,6 +49,7 @@ type ConnState =
   | { kind: 'closed'; reason?: string };
 
 const REMEMBER_USER_KEY_PREFIX = 'webshell.last_user.';
+const SUPPORTED_SSH_PORT = 22;
 
 function rememberUserKey(deviceId: string) {
   return `${REMEMBER_USER_KEY_PREFIX}${deviceId}`;
@@ -246,7 +247,10 @@ export default function DeviceShellPage() {
 
       ws.onopen = () => {
         const { cols, rows } = sizeRef.current;
-        const sshHost = inputs.port && inputs.port !== 22 ? `127.0.0.1:${inputs.port}` : '';
+        const sshHost =
+          inputs.port && inputs.port !== SUPPORTED_SSH_PORT
+            ? `127.0.0.1:${inputs.port}`
+            : '';
         sendControl(ws, {
           type: 'open',
           cols,
@@ -501,7 +505,7 @@ function ConnectModal({
   const { tr } = useI18n();
   const [user, setUser] = useState('');
   const [password, setPassword] = useState('');
-  const [port, setPort] = useState<string>('22');
+  const [port, setPort] = useState<string>(String(SUPPORTED_SSH_PORT));
   const [remember, setRemember] = useState(true);
   const [advanced, setAdvanced] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -533,9 +537,13 @@ function ConnectModal({
       setErr(tr('请输入密码', 'Please enter the password'));
       return;
     }
-    const p = Number(port || '22');
+    const p = Number(port || String(SUPPORTED_SSH_PORT));
     if (!Number.isFinite(p) || p < 1 || p > 65535) {
       setErr(tr('端口必须在 1-65535 之间', 'Port must be between 1 and 65535'));
+      return;
+    }
+    if (p !== SUPPORTED_SSH_PORT) {
+      setErr(tr('当前版本仅支持 SSH 22 端口', 'Only SSH port 22 is supported in this version'));
       return;
     }
     onSubmit({ user: u, password, port: p, remember });
@@ -611,10 +619,11 @@ function ConnectModal({
                 value={port}
                 onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ''))}
                 placeholder="22"
-                className="w-32 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+                disabled
+                className="w-32 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
               />
               <p className="mt-1 text-[11px] text-zinc-600">
-                {tr('默认走设备本地 sshd（127.0.0.1:22）。改端口仅在本机另起 sshd 时有用。', "Defaults to the device's local sshd (127.0.0.1:22). Change only if you've started another sshd on a different port.")}
+                {tr('默认走设备本地 sshd（127.0.0.1:22）。当前版本暂不支持自定义端口。', "Uses the device's local sshd (127.0.0.1:22). Custom ports are not supported in this version.")}
               </p>
             </div>
           )}

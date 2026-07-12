@@ -110,6 +110,90 @@ func (u *Usecase) UpdateNameDescription(ctx context.Context, id uint64, name, de
 // Delete soft-deletes a device. Junction rows are NOT auto-removed —
 // caller is responsible (the v1 UI doesn't expose device deletion yet
 // so this is a future hook).
+// UpdateProfile updates operator-owned asset metadata used by the
+// AI-SecOps product surface.
+func (u *Usecase) UpdateProfile(ctx context.Context, id uint64, p Profile) error {
+	if u.repo == nil {
+		return errs.ErrNotWiredYet
+	}
+	p.Name = strings.TrimSpace(p.Name)
+	p.Description = strings.TrimSpace(p.Description)
+	p.BusinessSystem = strings.TrimSpace(p.BusinessSystem)
+	p.Environment = strings.TrimSpace(p.Environment)
+	p.Region = strings.TrimSpace(p.Region)
+	p.Datacenter = strings.TrimSpace(p.Datacenter)
+	p.CloudProvider = strings.TrimSpace(p.CloudProvider)
+	p.Owner = strings.TrimSpace(p.Owner)
+	p.Criticality = strings.TrimSpace(p.Criticality)
+	p.SecurityLevel = strings.TrimSpace(p.SecurityLevel)
+	p.MaintenanceWindow = strings.TrimSpace(p.MaintenanceWindow)
+	p.AssetType = strings.TrimSpace(p.AssetType)
+	p.CollectionMode = strings.TrimSpace(p.CollectionMode)
+	p.ExternalSource = strings.TrimSpace(p.ExternalSource)
+	p.ExternalRef = strings.TrimSpace(p.ExternalRef)
+	p.MetricMatcher = strings.TrimSpace(p.MetricMatcher)
+	p.LogMatcher = strings.TrimSpace(p.LogMatcher)
+	p.Tags = normalizeTags(p.Tags)
+
+	if err := checkLen("name", p.Name, 255); err != nil {
+		return err
+	}
+	if err := checkLen("description", p.Description, 255); err != nil {
+		return err
+	}
+	if err := checkLen("business_system", p.BusinessSystem, 128); err != nil {
+		return err
+	}
+	if err := checkLen("environment", p.Environment, 32); err != nil {
+		return err
+	}
+	if err := checkLen("region", p.Region, 64); err != nil {
+		return err
+	}
+	if err := checkLen("datacenter", p.Datacenter, 64); err != nil {
+		return err
+	}
+	if err := checkLen("cloud_provider", p.CloudProvider, 64); err != nil {
+		return err
+	}
+	if err := checkLen("owner", p.Owner, 128); err != nil {
+		return err
+	}
+	if err := checkLen("criticality", p.Criticality, 16); err != nil {
+		return err
+	}
+	if err := checkLen("security_level", p.SecurityLevel, 32); err != nil {
+		return err
+	}
+	if err := checkLen("maintenance_window", p.MaintenanceWindow, 128); err != nil {
+		return err
+	}
+	if err := checkLen("asset_type", p.AssetType, 32); err != nil {
+		return err
+	}
+	if err := checkLen("collection_mode", p.CollectionMode, 32); err != nil {
+		return err
+	}
+	if err := checkLen("external_source", p.ExternalSource, 64); err != nil {
+		return err
+	}
+	if err := checkLen("external_ref", p.ExternalRef, 128); err != nil {
+		return err
+	}
+	if err := checkLen("metric_matcher", p.MetricMatcher, 512); err != nil {
+		return err
+	}
+	if err := checkLen("log_matcher", p.LogMatcher, 512); err != nil {
+		return err
+	}
+	for _, tag := range p.Tags {
+		if err := checkLen("tag", tag, 32); err != nil {
+			return err
+		}
+	}
+	return u.repo.UpdateProfile(ctx, id, p)
+}
+
 func (u *Usecase) Delete(ctx context.Context, id uint64) error {
 	if u.repo == nil {
 		return errs.ErrNotWiredYet
@@ -142,4 +226,32 @@ func (u *Usecase) LinkHost(ctx context.Context, edgeID, deviceID uint64) error {
 		return errs.ErrNotWiredYet
 	}
 	return u.links.Link(ctx, edgeID, deviceID, model.EdgeDeviceRelationHost)
+}
+
+func checkLen(field, value string, max int) error {
+	if len(value) > max {
+		return fmt.Errorf("%w: %s exceeds %d bytes", errs.ErrInvalid, field, max)
+	}
+	return nil
+}
+
+func normalizeTags(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, raw := range in {
+		tag := strings.TrimSpace(strings.ReplaceAll(raw, ",", ""))
+		if tag == "" {
+			continue
+		}
+		key := strings.ToLower(tag)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, tag)
+		if len(out) >= 20 {
+			break
+		}
+	}
+	return out
 }

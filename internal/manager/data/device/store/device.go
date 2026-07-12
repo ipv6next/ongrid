@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -169,6 +170,39 @@ func (r *Repo) UpdateNameDescription(ctx context.Context, id uint64, name, descr
 	return nil
 }
 
+// UpdateProfile writes the operator-editable asset profile.
+func (r *Repo) UpdateProfile(ctx context.Context, id uint64, p biz.Profile) error {
+	res := r.db.WithContext(ctx).Model(&model.Device{}).Where("id = ?", id).Updates(map[string]any{
+		"name":                 p.Name,
+		"description":          p.Description,
+		"business_system":      p.BusinessSystem,
+		"environment":          p.Environment,
+		"region":               p.Region,
+		"datacenter":           p.Datacenter,
+		"cloud_provider":       p.CloudProvider,
+		"owner":                p.Owner,
+		"criticality":          p.Criticality,
+		"security_level":       p.SecurityLevel,
+		"maintenance_window":   p.MaintenanceWindow,
+		"tags":                 strings.Join(p.Tags, ","),
+		"asset_type":           p.AssetType,
+		"collection_mode":      p.CollectionMode,
+		"external_source":      p.ExternalSource,
+		"external_ref":         p.ExternalRef,
+		"metric_datasource_id": p.MetricDatasourceID,
+		"metric_matcher":       p.MetricMatcher,
+		"log_datasource_id":    p.LogDatasourceID,
+		"log_matcher":          p.LogMatcher,
+	})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errs.ErrNotFound
+	}
+	return nil
+}
+
 // MarkOnline flips online=true and bumps last_seen_at.
 func (r *Repo) MarkOnline(ctx context.Context, id uint64) error {
 	now := time.Now().UTC()
@@ -271,6 +305,27 @@ func (r *Repo) List(ctx context.Context, f biz.ListFilter) ([]*model.Device, err
 	}
 	if f.Name != "" {
 		tx = tx.Where("name LIKE ?", "%"+f.Name+"%")
+	}
+	if f.BusinessSystem != "" {
+		tx = tx.Where("business_system LIKE ?", "%"+f.BusinessSystem+"%")
+	}
+	if f.Environment != "" {
+		tx = tx.Where("environment = ?", f.Environment)
+	}
+	if f.Region != "" {
+		tx = tx.Where("region = ?", f.Region)
+	}
+	if f.Datacenter != "" {
+		tx = tx.Where("datacenter LIKE ?", "%"+f.Datacenter+"%")
+	}
+	if f.CloudProvider != "" {
+		tx = tx.Where("cloud_provider = ?", f.CloudProvider)
+	}
+	if f.Owner != "" {
+		tx = tx.Where("owner LIKE ?", "%"+f.Owner+"%")
+	}
+	if f.Criticality != "" {
+		tx = tx.Where("criticality = ?", f.Criticality)
 	}
 	if f.Limit > 0 {
 		tx = tx.Limit(f.Limit)

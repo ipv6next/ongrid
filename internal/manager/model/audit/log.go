@@ -15,7 +15,7 @@ import "time"
 //     anon endpoint) can write NULL and still satisfy the FK semantics
 //     a future migration may add.
 //   - All TEXT columns are NOT NULL but **without** a GORM-level
-//     default:'' tag — MySQL 8 rejects DEFAULT on TEXT (Error 1101), as
+//     default:” tag - MySQL 8 rejects DEFAULT on TEXT (Error 1101), as
 //     tripped by v0.7.43's investigation_report migration. Go's zero
 //     value for string is "" so NOT NULL is satisfied at insert time.
 //   - PayloadJSON is the only free-form field. The biz layer must
@@ -27,23 +27,23 @@ import "time"
 //     audit middleware itself when no upstream id exists). Lets an
 //     operator join an audit row back to slog / future tracing output.
 type Log struct {
-	ID            uint64    `gorm:"primaryKey;autoIncrement"`
-	OccurredAt    time.Time `gorm:"not null;index:idx_audit_occurred"`
-	UserID        *uint64   `gorm:"index:idx_audit_user,priority:1"`
-	UserEmail     string    `gorm:"size:255;not null"`
-	Role          string    `gorm:"size:16;not null"`
-	IP            string    `gorm:"size:45;not null"`
-	UserAgent     string    `gorm:"size:512;not null"`
-	Action        string    `gorm:"size:64;not null;index:idx_audit_action,priority:1"`
-	ResourceType  string    `gorm:"size:32;not null;index:idx_audit_resource,priority:1"`
-	ResourceID    string    `gorm:"size:128;not null;index:idx_audit_resource,priority:2"`
-	ResourceName  string    `gorm:"size:256;not null"`
-	Status        string    `gorm:"size:16;not null;index:idx_audit_status,priority:1"`
-	ErrorCode     string    `gorm:"size:64;not null"`
-	ErrorMessage  string    `gorm:"size:512;not null"`
-	PayloadJSON   string    `gorm:"type:text"`
-	RequestID     string    `gorm:"size:64;not null"`
-	CreatedAt     time.Time `gorm:"autoCreateTime"`
+	ID           uint64    `gorm:"primaryKey;autoIncrement"`
+	OccurredAt   time.Time `gorm:"not null;index:idx_audit_occurred"`
+	UserID       *uint64   `gorm:"index:idx_audit_user,priority:1"`
+	UserEmail    string    `gorm:"size:255;not null"`
+	Role         string    `gorm:"size:16;not null"`
+	IP           string    `gorm:"size:45;not null"`
+	UserAgent    string    `gorm:"size:512;not null"`
+	Action       string    `gorm:"size:64;not null;index:idx_audit_action,priority:1"`
+	ResourceType string    `gorm:"size:32;not null;index:idx_audit_resource,priority:1"`
+	ResourceID   string    `gorm:"size:128;not null;index:idx_audit_resource,priority:2"`
+	ResourceName string    `gorm:"size:256;not null"`
+	Status       string    `gorm:"size:16;not null;index:idx_audit_status,priority:1"`
+	ErrorCode    string    `gorm:"size:64;not null"`
+	ErrorMessage string    `gorm:"size:512;not null"`
+	PayloadJSON  string    `gorm:"type:text"`
+	RequestID    string    `gorm:"size:64;not null"`
+	CreatedAt    time.Time `gorm:"autoCreateTime"`
 }
 
 // TableName pins the table so a package rename doesn't silently create a
@@ -96,6 +96,10 @@ const (
 	ActionIncidentAck     = "incident_ack"
 	ActionIncidentResolve = "incident_resolve"
 	ActionIncidentSilence = "incident_silence"
+	ActionApprovalApprove = "approval_approve"
+	ActionApprovalReject  = "approval_reject"
+	ActionReportArchive   = "report_archive"
+	ActionReportExport    = "report_export"
 
 	// Settings umbrella. LLM key / Grafana config / SSH key writes all
 	// land here; payload carries {"key": "...", "category": "..."}.
@@ -111,8 +115,10 @@ const (
 	ActionRepoDelete = "repo_delete"
 	ActionRepoSync   = "repo_sync"
 
-	ActionSkillInstall   = "skill_install"
-	ActionSkillUninstall = "skill_uninstall"
+	ActionSkillInstall         = "skill_install"
+	ActionSkillUninstall       = "skill_uninstall"
+	ActionSkillExecute         = "skill_execute"
+	ActionSecurityPolicyUpdate = "security_policy_update"
 )
 
 // ResourceType buckets used in the resource_type column. Same flat-list
@@ -121,15 +127,18 @@ const (
 	ResourceUser     = "user"
 	ResourceDevice   = "device"
 	ResourceIncident = "incident"
+	ResourceApproval = "approval"
+	ResourceReport   = "report"
 	ResourceSetting  = "setting"
 	ResourceRule     = "rule"
-	ResourceChannel = "channel"
-	ResourceRepo    = "repo"
-	ResourceSkill   = "skill"
-	ResourceLLM     = "llm"
-	ResourceGitKey  = "git_ssh_key"
-	ResourceGrafana = "grafana"
-	ResourceRAG     = "rag"
-	ResourceAudit   = "audit"
-	ResourceAuth    = "auth"
+	ResourceChannel  = "channel"
+	ResourceRepo     = "repo"
+	ResourceSkill    = "skill"
+	ResourceLLM      = "llm"
+	ResourceGitKey   = "git_ssh_key"
+	ResourceGrafana  = "grafana"
+	ResourceRAG      = "rag"
+	ResourceAudit    = "audit"
+	ResourceAuth     = "auth"
+	ResourceEdge     = "edge"
 )

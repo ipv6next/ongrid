@@ -112,15 +112,16 @@ func toFlowDTO(f *model.Flow, withGraph bool) flowDTO {
 }
 
 type runDTO struct {
-	ID          string `json:"id"`
-	FlowID      uint64 `json:"flow_id"`
-	FlowVersion int    `json:"flow_version"`
-	Status      string `json:"status"`
-	TriggerType string `json:"trigger_type"`
-	Error       string `json:"error,omitempty"`
-	StartedAt   string `json:"started_at,omitempty"`
-	FinishedAt  string `json:"finished_at,omitempty"`
-	CreatedAt   string `json:"created_at"`
+	ID          string          `json:"id"`
+	FlowID      uint64          `json:"flow_id"`
+	FlowVersion int             `json:"flow_version"`
+	Status      string          `json:"status"`
+	TriggerType string          `json:"trigger_type"`
+	Trigger     json.RawMessage `json:"trigger,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	StartedAt   string          `json:"started_at,omitempty"`
+	FinishedAt  string          `json:"finished_at,omitempty"`
+	CreatedAt   string          `json:"created_at"`
 }
 
 func toRunDTO(r *model.FlowRun) runDTO {
@@ -130,6 +131,7 @@ func toRunDTO(r *model.FlowRun) runDTO {
 		FlowVersion: r.FlowVersion,
 		Status:      r.Status,
 		TriggerType: r.TriggerType,
+		Trigger:     json.RawMessage(r.TriggerJSON),
 		Error:       r.Error,
 		CreatedAt:   r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
@@ -169,7 +171,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]flowDTO, 0, len(rows))
 	for _, f := range rows {
-		items = append(items, toFlowDTO(f, false))
+		// The list run action derives its required trigger input from
+		// {{trigger.*}} references, so it needs the graph definition.
+		items = append(items, toFlowDTO(f, true))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total})
 }

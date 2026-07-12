@@ -9,6 +9,7 @@ import { useParams } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 
 import { fetchPageHTML } from '@/api/pages';
+import { normalizeHtmlArtifact } from '@/lib/htmlArtifact';
 
 export default function PageView() {
   const { id } = useParams<{ id: string }>();
@@ -21,7 +22,7 @@ export default function PageView() {
     setHtml(null);
     setFailed(false);
     fetchPageHTML(id)
-      .then((h) => alive && setHtml(h))
+      .then((h) => alive && setHtml(normalizeHtmlArtifact(h)))
       .catch(() => alive && setFailed(true));
     return () => {
       alive = false;

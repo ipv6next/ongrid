@@ -282,9 +282,10 @@ func buildSystemReminder(in *Input) string {
 		return ""
 	}
 	lines := []string{
-		"- 同一工具失败两次后请换思路，不要重复调用",
+		"- 同一工具在本轮失败两次后请换思路，不要在本轮重复调用；用户在后续新一轮明确要求执行或重试时，必须允许一次新的工具探测",
 		"- device_id / alert_id 必须是数字 ID（@-mention 已经为你解析）",
 		"- 工具结果是事实，不要在没有数据时编造",
+		"- 历史工具错误只代表当时状态，不能直接当作本轮执行结果；用户要求执行命令时必须以本轮新 tool call 的结果作答",
 		"- 历史里的 call_budget_exceeded / 工具调用上限只属于当时那一轮；当前用户消息是新一轮，需要时可以重新调用工具。除非本轮刚收到 call_budget_exceeded 工具结果，否则不要声称已达到本轮工具上限",
 	}
 	// Re-assert the response language every turn (system prompt scrolls

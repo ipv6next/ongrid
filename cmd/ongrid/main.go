@@ -85,11 +85,13 @@ import (
 	managerbizpromwrite "github.com/ongridio/ongrid/internal/manager/biz/promwrite"
 	managerbiztopology "github.com/ongridio/ongrid/internal/manager/biz/topology"
 	manageralertdata "github.com/ongridio/ongrid/internal/manager/data/alert/store"
+	managerdatasourcedata "github.com/ongridio/ongrid/internal/manager/data/datasource/store"
 	managerdevicedata "github.com/ongridio/ongrid/internal/manager/data/device/store"
 	manageredgedata "github.com/ongridio/ongrid/internal/manager/data/edge/store"
 	managermetricdata "github.com/ongridio/ongrid/internal/manager/data/metric/store"
 	managertopologydata "github.com/ongridio/ongrid/internal/manager/data/topology/store"
 	managermodelalert "github.com/ongridio/ongrid/internal/manager/model/alert"
+	managermodelapproval "github.com/ongridio/ongrid/internal/manager/model/approval"
 
 	managerbizaiops "github.com/ongridio/ongrid/internal/manager/biz/aiops"
 	aiopsagent "github.com/ongridio/ongrid/internal/manager/biz/aiops/agent"
@@ -144,6 +146,7 @@ import (
 	managerserveralert "github.com/ongridio/ongrid/internal/manager/server/alert"
 	managerserverapproval "github.com/ongridio/ongrid/internal/manager/server/approval"
 	managerserveraudit "github.com/ongridio/ongrid/internal/manager/server/audit"
+	managerserverdatasource "github.com/ongridio/ongrid/internal/manager/server/datasource"
 	managerserverdevice "github.com/ongridio/ongrid/internal/manager/server/device"
 	managerserveredge "github.com/ongridio/ongrid/internal/manager/server/edge"
 	managerserveredgeauth "github.com/ongridio/ongrid/internal/manager/server/edgeauth"
@@ -155,6 +158,8 @@ import (
 	managerservermetric "github.com/ongridio/ongrid/internal/manager/server/metric"
 	managermiddleware "github.com/ongridio/ongrid/internal/manager/server/middleware"
 	managerservermonitor "github.com/ongridio/ongrid/internal/manager/server/monitor"
+	managerserverobservability "github.com/ongridio/ongrid/internal/manager/server/observability"
+	managerserverpatrol "github.com/ongridio/ongrid/internal/manager/server/patrol"
 	managerserverprom "github.com/ongridio/ongrid/internal/manager/server/prometheus"
 	managerserverreport "github.com/ongridio/ongrid/internal/manager/server/report"
 	managerserversecret "github.com/ongridio/ongrid/internal/manager/server/secret"
@@ -246,6 +251,7 @@ func main() {
 		iamdataorg.Migrate,
 		iamdatamembership.Migrate,
 		manageralertdata.Migrate,
+		managerdatasourcedata.Migrate,
 		managerdevicedata.Migrate,
 		manageredgedata.Migrate,
 		managertopologydata.Migrate,
@@ -720,6 +726,7 @@ func main() {
 
 	// manager/edge biz + service + server.
 	edgeRepo := manageredgedata.NewRepo(db)
+	datasourceRepo := managerdatasourcedata.NewRepo(db)
 	deviceRepo := managerdevicedata.NewRepo(db)
 	edgeDeviceRepo := managerdevicedata.NewEdgeDeviceRepo(db)
 	deviceUC := managerbizdevice.NewUsecase(deviceRepo, edgeDeviceRepo, log)
@@ -793,6 +800,8 @@ func main() {
 			slog.String("dir", edgeBundleDir), slog.Any("err", err))
 	}
 	deviceHandler := managerserverdevice.NewHandler(deviceUC)
+	datasourceHandler := managerserverdatasource.NewHandler(datasourceRepo)
+	observabilityHandler := managerserverobservability.NewHandler(deviceRepo, datasourceRepo, log)
 
 	// topology layer: nodes / relations / relation types. PR-1
 	// stands up CRUD + 6 built-in relation type seeds; later PRs hook
@@ -1076,6 +1085,7 @@ func main() {
 	webshellHandler.SetAuthz(authzMW)
 
 	alertSvc := managersvcalert.New(alertUC, alertRepo, notifyRouter, log.With(slog.String("comp", "alert-svc")))
+	alertSvc.SetAssetMatcher(deviceRepo)
 	// Wire the read-only preview clients (Prom range + Loki range). Each
 	// is optional — when nil, the corresponding kind returns skipped_reason
 	// instead of a hard error. Built before the AIOps runtime so
@@ -1106,7 +1116,8 @@ func main() {
 	// default 0=unlimited) drives an llm.InMemoryBudget that the graph-layer
 	// callback chain checks before each ChatModel turn — see Phase 4 cbDeps
 	// build below where the checker is set when the limit > 0.
-	aiopsRepo := manageraiopsdata.NewBizRepo(db)
+	aiopsStore := manageraiopsdata.NewSessionRepo(db)
+	aiopsRepo := aiopsStore
 	// PromQuerier is the interface tools/registry takes; passing a typed-nil
 	// *Client would yield a non-nil interface and bypass the conditional
 	// tool registration. Explicitly hand it nil when Prom is disabled.
@@ -1493,13 +1504,13 @@ func main() {
 		// exposes InvestigateAsync which discards ctx; the trigger needs
 		// the richer Enqueue signature.
 		rcaInvConcrete *investigator.Usecase
+		invRepo        = manageralertdata.NewInvestigationRepo(db)
 	)
 	if os.Getenv("ONGRID_INVESTIGATOR_ENABLED") == "true" {
 		concreteRt, _ := aiopsRuntime.(*aiopschatruntime.Runtime)
 		if concreteRt == nil {
 			log.Warn("structured RCA investigator skipped: chatruntime runtime not available")
 		} else {
-			invRepo := manageralertdata.NewInvestigationRepo(db)
 			maxCC := 5
 			if v := os.Getenv("ONGRID_INVESTIGATOR_MAX_CONCURRENT"); v != "" {
 				if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -1593,6 +1604,49 @@ func main() {
 	}
 	reportHandler := managerserverreport.NewHandler(reportUC)
 
+	approvalUC := managerbizapproval.NewUsecase(managerapprovaldata.NewRepo(db), log.With(slog.String("comp", "approval")))
+	if rcaInvConcrete != nil {
+		rcaInvConcrete.WithApprovalSink(approvalUC)
+	}
+	approvalUC.RegisterDecisionObserver(func(ctx context.Context, a *managermodelapproval.Approval) {
+		if a == nil || a.IncidentID == 0 {
+			return
+		}
+		incident, err := alertUC.GetIncident(ctx, a.IncidentID)
+		if err != nil {
+			log.Warn("approval timeline incident lookup failed", slog.Any("err", err))
+			return
+		}
+		eventType := managermodelalert.EventTypeApprovalApproved
+		title := "建议动作已批准"
+		switch a.Status {
+		case managermodelapproval.StatusRejected:
+			eventType, title = managermodelalert.EventTypeApprovalRejected, "建议动作已拒绝"
+		case managermodelapproval.StatusExecuted:
+			eventType, title = managermodelalert.EventTypeActionExecuted, "建议动作已执行"
+		case managermodelapproval.StatusFailed:
+			eventType, title = managermodelalert.EventTypeActionFailed, "建议动作执行失败"
+		}
+		snapshot, _ := json.Marshal(map[string]any{
+			"approval_id": a.ID, "source": a.SourceType, "risk_level": a.RiskLevel,
+			"action_type": a.ActionType, "status": a.Status, "result": a.ResultJSON,
+		})
+		message := a.Recommendation
+		if a.Status == managermodelapproval.StatusRejected && a.Reason != nil {
+			message = *a.Reason
+		}
+		if err := alertRepo.CreateEvent(ctx, &managermodelalert.Event{
+			IncidentID: a.IncidentID, EventType: eventType, StatusAfter: incident.Status,
+			Severity: incident.Severity, Title: title, Message: &message,
+			ActorType: managermodelalert.ActorTypeUser, ActorID: a.ApprovedBy,
+			OperatorUserID: a.ApprovedBy, SnapshotJSON: string(snapshot),
+			Reason: title, OccurredAt: time.Now().UTC(),
+		}); err != nil {
+			log.Warn("write approval event timeline failed", slog.Any("err", err))
+		}
+	})
+	approvalHandler := managerserverapproval.NewHandler(approvalUC)
+
 	// Flow orchestration (HLD-016): user-authored workflow DAGs executed
 	// over the existing agent / tool / notify subsystems. Routes mount
 	// even when the LLM runtime is down — tool/notify/condition nodes
@@ -1613,7 +1667,12 @@ func main() {
 	flowUC := managerbizflow.NewUsecase(flowRepo, flowRunRepo,
 		managerbizflow.NewEngine(flowExec, flowRunRepo, log), log).
 		WithToolCatalog(flowToolCatalog{reg: toolsReg}).
-		WithLLM(flowLLMRunner{client: llmClient})
+		WithLLM(flowLLMRunner{client: llmClient}).
+		WithProductSinks(managerbizflow.ProductSinks{
+			Investigations: invRepo,
+			Approvals:      approvalUC,
+			Reports:        reportUC,
+		})
 	flowUC.HealStaleRuns(rootCtx)
 	// HLD-016 triggers: alert dispatcher (auto-start matching flows when an
 	// alert fires) + cron scheduler (time-based flows). Both nil-safe and
@@ -1654,7 +1713,9 @@ func main() {
 	}
 
 	alertHandler := managerserveralert.NewHandler(alertSvc, alertSvc, alertSvc).
-		WithInvestigations(manageralertdata.NewInvestigationRepo(db)).
+		WithInvestigations(invRepo).
+		WithInvestigationTrace(aiopsStore).
+		WithAlertmanagerPublicToken(os.Getenv("ONGRID_ALERTMANAGER_WEBHOOK_TOKEN")).
 		WithRuntime(cfg.Alert.EvaluatorInterval, cfg.Alert.Cooldown)
 	if rcaInvConcrete != nil {
 		alertHandler.WithInvestigationTrigger(rcaInvConcrete)
@@ -1745,6 +1806,44 @@ func main() {
 		return out
 	})
 	skillHandler := managerserverskill.NewHandler(skillSvc)
+	approvalUC.RegisterExecutor("suggested_action", func(ctx context.Context, payloadJSON string) (string, error) {
+		var envelope struct {
+			ActionType string         `json:"action_type"`
+			Action     map[string]any `json:"action"`
+		}
+		if err := json.Unmarshal([]byte(payloadJSON), &envelope); err != nil {
+			return "", err
+		}
+		switch envelope.ActionType {
+		case "skill":
+			key, _ := envelope.Action["skill_key"].(string)
+			edgeID, _ := numberToUint64(envelope.Action["edge_id"])
+			params, _ := json.Marshal(envelope.Action["params"])
+			out, err := skillSvc.Execute(ctx, managerbizskill.Caller{Role: "admin"}, managerbizskill.ExecuteInput{
+				Key: key, EdgeID: edgeID, Params: params,
+			})
+			if err != nil {
+				return "", err
+			}
+			b, _ := json.Marshal(out)
+			return string(b), nil
+		case "workflow":
+			flowID, ok := numberToUint64(envelope.Action["workflow_id"])
+			if !ok || flowID == 0 {
+				return "", fmt.Errorf("workflow_id required")
+			}
+			input, _ := envelope.Action["input"].(map[string]any)
+			run, err := flowUC.Trigger(ctx, flowID, input, nil)
+			if err != nil {
+				return "", err
+			}
+			b, _ := json.Marshal(map[string]any{"run_id": run.ID, "status": run.Status})
+			return string(b), nil
+		default:
+			return "", fmt.Errorf("unsupported suggested action type %q", envelope.ActionType)
+		}
+	})
+	patrolHandler := managerserverpatrol.NewHandler(deviceRepo, edgeDeviceRepo, fbClient)
 
 	// marketplace wiring. Install / List / Uninstall on
 	// /v1/marketplace/*. The usecase reloads the chatruntime registries
@@ -1818,8 +1917,6 @@ func main() {
 	// HLD-017 propose-confirm inbox: human approval queue for dangerous
 	// actions (agent cloud-shell, etc.). Additive — empty until a producer
 	// proposes; producers register their execute-on-approve executor.
-	approvalUC := managerbizapproval.NewUsecase(managerapprovaldata.NewRepo(db), log.With(slog.String("comp", "approval")))
-	approvalHandler := managerserverapproval.NewHandler(approvalUC)
 	// HLD-017 cloud_bash producer: register the execute-on-approve executor
 	// (resolve the bound credential → inject into the Runner sandbox → run)
 	// and wire the cloud_bash tool's proposer seam to the approval inbox.
@@ -2180,6 +2277,7 @@ func main() {
 		// can't carry our manager JWT. Auth comes from the platform
 		// signature scheme inside the handler.
 		imbridgeHandler.RegisterPublic(api)
+		alertHandler.RegisterPublic(api)
 		// serve_page: public read of an assistant-hosted HTML page (under /api
 		// so nginx proxies it to the manager). The random token IS the
 		// capability; id is validated to block path traversal.
@@ -2267,6 +2365,8 @@ func main() {
 			edgeHandler.Register(protected)
 			webshellHandler.Register(protected)
 			deviceHandler.Register(protected)
+			datasourceHandler.Register(protected)
+			observabilityHandler.Register(protected)
 			topologyHandler.Register(protected)
 			metricHandler.Register(protected)
 			monitorHandler.Register(protected)
@@ -2278,6 +2378,7 @@ func main() {
 			systemUpgradeHandler.Register(protected)
 			imbridgeHandler.RegisterProtected(protected)
 			skillHandler.Register(protected)
+			patrolHandler.Register(protected)
 			if knowledgeHandler != nil {
 				knowledgeHandler.Register(protected)
 			}
@@ -2633,6 +2734,22 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func numberToUint64(v any) (uint64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return uint64(n), n > 0
+	case int:
+		return uint64(n), n > 0
+	case uint64:
+		return n, n > 0
+	case string:
+		parsed, err := strconv.ParseUint(strings.TrimSpace(n), 10, 64)
+		return parsed, err == nil && parsed > 0
+	default:
+		return 0, false
+	}
 }
 
 func knownLLMProviderIDs() []string {
@@ -3398,6 +3515,7 @@ func ongridBasePrompt() string {
    |---|---|
    | 网络 / OVS / 防火墙 / 路由 / iptables / netns / 流表 / 带宽 / 端口 / DNS / TLS / MTU / 连通性 | ` + bt + `specialist-network` + bt + ` |
    | 磁盘 / 容量 / 大文件 / 满了 / inode / du / 占用 / 文件系统 | ` + bt + `specialist-disk` + bt + ` |
+   | Docker / docker / 容器 / container / Compose / compose / 镜像 / image / 健康检查 / 重启次数 | ` + bt + `specialist-container` + bt + ` |
    | CPU / 内存 / load / 进程 / OOM / 调度 / NUMA / 上下文切换 / sysctl / 内存泄漏 | ` + bt + `specialist-compute` + bt + ` |
    | SLO / 黄金信号 / 错误预算 / 趋势 / 一段时间内 / 异常机器 / 优先级 / 集群健康 | ` + bt + `specialist-sre` + bt + ` |
    | 服务状态 / systemctl / journalctl / 重启 / 部署 / cron / 配置 / 最近有没有重启 | ` + bt + `specialist-ops` + bt + ` |

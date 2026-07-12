@@ -24,6 +24,13 @@ type ListFilter struct {
 	Online           *bool
 	Hostname         string
 	Name             string
+	BusinessSystem   string
+	Environment      string
+	Region           string
+	Datacenter       string
+	CloudProvider    string
+	Owner            string
+	Criticality      string
 	Limit            int
 	Offset           int
 }
@@ -64,6 +71,9 @@ type Repo interface {
 
 	// UpdateNameDescription updates operator-editable display fields.
 	UpdateNameDescription(ctx context.Context, id uint64, name, description string) error
+
+	// UpdateProfile updates operator-editable asset profile fields.
+	UpdateProfile(ctx context.Context, id uint64, profile Profile) error
 
 	// SetNodeID writes Device.NodeID — the link to the topology
 	// `nodes` table. Called from the edge register flow (via NodeMirror)
@@ -118,4 +128,28 @@ type Usage struct {
 	CPUPct  float32
 	MemPct  float32
 	DiskPct float32
+}
+
+// Profile is the operator-owned asset profile for one device.
+type Profile struct {
+	Name               string
+	Description        string
+	BusinessSystem     string
+	Environment        string
+	Region             string
+	Datacenter         string
+	CloudProvider      string
+	Owner              string
+	Criticality        string
+	SecurityLevel      string
+	MaintenanceWindow  string
+	Tags               []string
+	AssetType          string
+	CollectionMode     string
+	ExternalSource     string
+	ExternalRef        string
+	MetricDatasourceID *uint64
+	MetricMatcher      string
+	LogDatasourceID    *uint64
+	LogMatcher         string
 }

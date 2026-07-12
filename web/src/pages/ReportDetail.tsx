@@ -8,6 +8,8 @@ import { usePermissions } from '@/store/me';
 import { useI18n } from '@/i18n/locale';
 import { ReportContentView } from '@/components/ReportContent';
 import { deleteReport, getReport, shareReport, type ReportDetail } from '@/api/reports';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 export default function ReportDetailPage() {
   const { id = '' } = useParams();
@@ -119,13 +121,19 @@ export default function ReportDetailPage() {
               <div className="font-medium">{tr('报告生成失败', 'Report generation failed')}</div>
               {report.error_msg && <div className="mt-1 text-xs text-red-300/80">{report.error_msg}</div>}
             </div>
-          ) : report.status !== 'ready' || !report.content ? (
+          ) : report.status !== 'ready' ? (
             <div className="py-12 text-center text-sm text-zinc-500">
               <RefreshCw size={18} className="mx-auto mb-2 animate-spin" />
               {tr('报告生成中，请稍候…', 'Report is being generated…')}
             </div>
-          ) : (
+          ) : report.content ? (
             <ReportContentView content={report.content} />
+          ) : report.content_md ? (
+            <article className="prose prose-invert max-w-none rounded-lg border border-zinc-800 bg-zinc-950/40 px-5 py-4 text-sm">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{report.content_md}</ReactMarkdown>
+            </article>
+          ) : (
+            <div className="py-12 text-center text-sm text-zinc-500">报告内容为空</div>
           )}
 
           {/* Delivery status panel (PR-7) */}

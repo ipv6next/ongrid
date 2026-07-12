@@ -82,6 +82,12 @@ const BUILTIN_AGENT_I18N: Record<string, { desc: { zh: string; en: string }; whe
       en: 'Disk specialist: handles low space / inode exhaustion / I/O bottlenecks / filesystem anomalies and related disk issues.',
     },
   },
+  'specialist-container': {
+    desc: {
+      zh: '容器运维专家：排查 Docker 容器状态、日志、健康检查、资源占用、网络、挂载、镜像和 Compose 服务异常。',
+      en: 'Container operations specialist for Docker status, logs, health checks, resources, networking, mounts, images, and Compose services.',
+    },
+  },
   reviewer: {
     desc: {
       zh: '审核员：在执行 mutating 技能（重启服务 / 改配置 / 删数据）前做二审，把关风险。',

@@ -403,6 +403,7 @@ func (t *CorrelateIncidentTool) queryEdgeSnapshot(ctx context.Context, edgeID ui
 		if t.devices != nil && edge.DeviceID != nil {
 			if d, derr := t.devices.Get(edgeCtx, *edge.DeviceID); derr == nil && d != nil {
 				snap.Roles = devicemodel.DecodeRoles(d.Roles)
+				snap.AssetProfile = assetProfileFromDevice(d)
 			}
 		}
 	} else if err != nil && !errors.Is(err, context.Canceled) {

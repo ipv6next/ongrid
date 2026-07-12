@@ -7,6 +7,7 @@ export type Incident = {
   id: number;
   rule_key: string;
   rule_name: string;
+  source_type?: string;
   severity: IncidentSeverity;
   status: IncidentStatus;
   summary: string;
@@ -136,8 +137,31 @@ export type InvestigationReport = {
   ready_at?: string;
 };
 
+export type InvestigationToolCall = {
+  id: string;
+  llm_call_id?: string;
+  message_id: string;
+  tool_name: string;
+  device_id?: number;
+  status: 'pending' | 'success' | 'error' | 'timeout' | string;
+  error?: string;
+  arguments?: unknown;
+  result?: unknown;
+  started_at: string;
+  ended_at?: string;
+  duration_ms?: number;
+  created_at: string;
+};
+
 export function getIncidentInvestigation(id: number) {
   return request<InvestigationReport>('GET', `/alerts/incidents/${id}/investigation`);
+}
+
+export function listInvestigationToolCalls(id: number) {
+  return request<{ items: InvestigationToolCall[]; total: number }>(
+    'GET',
+    `/alerts/incidents/${id}/investigation/tool-calls`,
+  );
 }
 
 // Manually enqueue an investigation for an incident that didn't

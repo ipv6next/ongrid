@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useLocation, useParams } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { MessageSquare, Plus, Search } from 'lucide-react';
 import { ChatInput, type ModelSelection, type SubmitPayload } from '@/components/ChatInput';
 import { MessageBubble, type ConfigDraftResult } from '@/components/MessageBubble';
 import { AgentBadge } from '@/components/AgentBadge';
+import { listAgents, type AgentSummary } from '@/api/agents';
 import { PageHeader } from '@/components/ui';
 import {
   getMessages,
@@ -12,6 +14,7 @@ import {
   type ChatMessage,
   type LLMProvider,
   type Mention,
+  createSession,
 } from '@/api/chat';
 import { listApprovals, type Approval } from '@/api/approvals';
 import { invalidateChatSessions, useChatSessions } from '@/store/chatSessions';
@@ -27,6 +30,7 @@ export default function ChatThreadPage() {
   const { isViewer } = usePermissions();
   const { sessionId = '' } = useParams<{ sessionId: string }>();
   const location = useLocation();
+  const navigate = useNavigate();
   const initialPrompt = (location.state as LocationState)?.initialPrompt;
 
   const sessions = useChatSessions((s) => s.sessions);
@@ -76,6 +80,22 @@ export default function ChatThreadPage() {
   // also exposes the skill. Defaults ON because SearXNG (default provider)
   // is zero-key zero-quota inside our compose stack — no cost to expose.
   const [webSearchEnabled, setWebSearchEnabled] = useState(true);
+  const [agents, setAgents] = useState<AgentSummary[]>([]);
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+
+  useEffect(() => {
+    void listAgents().then((r) => setAgents(r.items ?? [])).catch(() => setAgents([]));
+  }, []);
+
+  async function startAgentSession(agent: AgentSummary) {
+    if (agent.name === sessionAgentID) {
+      setAgentMenuOpen(false);
+      return;
+    }
+    const next = await createSession({ title: `使用 ${agent.name}`, agent_id: agent.name });
+    setAgentMenuOpen(false);
+    navigate(`/chat/${next.id}`);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -505,13 +525,43 @@ export default function ChatThreadPage() {
     );
 
   return (
-    <main className="flex flex-1 flex-col overflow-hidden">
+    <main className="flex flex-1 flex-row overflow-hidden">
+      <ChatSessionRail sessions={sessions} activeSessionId={sessionId} onNew={() => navigate('/assistant')} />
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <PageHeader
           className="px-6 py-3"
           title={
             <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-zinc-100">
               <span className="truncate">{sessionTitle || tr('会话', 'Session')}</span>
-              <AgentBadge agentId={sessionAgentID} size="sm" />
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setAgentMenuOpen((v) => !v)}
+                  className="inline-flex items-center gap-1 rounded-md border border-indigo-400/40 bg-indigo-500/10 px-2 py-1 text-[11px] text-indigo-200 hover:bg-indigo-500/20"
+                >
+                  <AgentBadge agentId={sessionAgentID} size="sm" />
+                  <span>切换专家</span>
+                </button>
+                {agentMenuOpen && (
+                  <div className="absolute left-0 top-full z-30 mt-2 w-72 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 p-1 shadow-2xl">
+                    <div className="px-2 py-1.5 text-[11px] text-zinc-500">选择专家，将新建一个会话</div>
+                    {agents.map((agent) => (
+                      <button
+                        key={agent.name}
+                        type="button"
+                        onClick={() => void startAgentSession(agent)}
+                        className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-zinc-800"
+                      >
+                        <AgentBadge agentId={agent.name} size="sm" />
+                        <span className="min-w-0">
+                          <span className="block truncate text-xs text-zinc-100">{agent.name}</span>
+                          <span className="mt-0.5 block line-clamp-2 text-[11px] text-zinc-500">{agent.description}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <span className="text-[11px] font-normal text-zinc-600">#{sessionId}</span>
             </span>
           }
@@ -581,6 +631,60 @@ export default function ChatThreadPage() {
             />
           </div>
         </div>
-      </main>
+      </div>
+    </main>
+  );
+}
+
+function ChatSessionRail({
+  sessions,
+  activeSessionId,
+  onNew,
+}: {
+  sessions: { id: string; title?: string; agent_id?: string | null }[];
+  activeSessionId: string;
+  onNew(): void;
+}) {
+  return (
+    <aside className="hidden w-64 shrink-0 flex-col border-r border-zinc-800/60 bg-zinc-950/40 md:flex">
+      <div className="border-b border-zinc-800/60 p-3">
+        <button
+          type="button"
+          onClick={onNew}
+          className="flex w-full items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800"
+        >
+          <Plus size={15} /> 新建会话
+        </button>
+        <div className="mt-3 flex items-center gap-2 rounded-md bg-zinc-900/60 px-2.5 py-1.5 text-xs text-zinc-500">
+          <Search size={13} />
+          <span>搜索会话</span>
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto p-2">
+        <div className="px-2 py-2 text-[11px] font-medium uppercase tracking-wider text-zinc-600">最近会话</div>
+        <div className="space-y-1">
+          {sessions.length === 0 ? (
+            <div className="px-2 py-3 text-xs text-zinc-600">暂无会话</div>
+          ) : (
+            sessions.map((session) => (
+              <NavLink
+                key={session.id}
+                to={`/chat/${session.id}`}
+                className={({ isActive }) =>
+                  `flex items-center gap-2 rounded-md px-2.5 py-2 text-sm ${
+                    isActive || String(session.id) === String(activeSessionId)
+                      ? 'bg-zinc-800 text-zinc-100'
+                      : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+                  }`
+                }
+              >
+                <MessageSquare size={14} className="shrink-0 text-zinc-500" />
+                <span className="min-w-0 flex-1 truncate">{session.title || '未命名会话'}</span>
+              </NavLink>
+            ))
+          )}
+        </div>
+      </div>
+    </aside>
   );
 }

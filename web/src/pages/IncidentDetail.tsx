@@ -9,6 +9,8 @@ import {
   Bot,
   CheckCircle2,
   ChevronLeft,
+  ClipboardCopy,
+  Download,
   ExternalLink,
   FileText,
   GitBranch,
@@ -21,6 +23,7 @@ import {
   X,
 } from 'lucide-react';
 import { Modal } from '@/components/Modal';
+import { Button } from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { openObservabilityUrl, buildExploreUrl } from '@/lib/drilldown';
 import { relativeTime } from '@/lib/format';
@@ -30,6 +33,7 @@ import {
   ackIncident,
   getIncident,
   getIncidentInvestigation,
+  listInvestigationToolCalls,
   triggerIncidentInvestigation,
   listIncidentEvents,
   localizedRuleName,
@@ -41,7 +45,9 @@ import {
   type IncidentStatus,
   type InvestigationReport,
   type InvestigationStatus,
+  type InvestigationToolCall,
 } from '@/api/alerts';
+import { listApprovals, type Approval } from '@/api/approvals';
 import {
   createSession,
   getMessages,
@@ -50,6 +56,8 @@ import {
   type ChatSession,
   type ToolCallSummary,
 } from '@/api/chat';
+import { archiveReport, listReports, type ReportListItem } from '@/api/reports';
+import { listFlows, listFlowRuns, type Flow, type FlowRun } from '@/api/flows';
 import { ApiError } from '@/api/client';
 import { usePermissions } from '@/store/me';
 import { tr as trInline, useI18n } from '@/i18n/locale';
@@ -63,6 +71,25 @@ const POLL_MS = 30_000;
 // AI_FAST_POLL_WINDOW_MS we fall back to the standard cadence.
 const AI_FAST_POLL_MS = 5_000;
 const AI_FAST_POLL_WINDOW_MS = 90_000;
+
+function sourceLabel(source?: string) {
+  switch (source) {
+    case 'alertmanager_external':
+      return '外部 Alertmanager';
+    case 'manual_report':
+      return '手工上报';
+    case 'patrol_risk':
+      return '巡检风险';
+    case 'prometheus_external':
+      return '外部 Prometheus';
+    case 'ongrid_builtin':
+    case '':
+    case undefined:
+      return 'Ongrid 内置规则';
+    default:
+      return source;
+  }
+}
 
 export default function IncidentDetailPage() {
   const { tr } = useI18n();
@@ -148,7 +175,9 @@ export default function IncidentDetailPage() {
             <div className="flex h-60 items-center justify-center text-sm text-zinc-500">{tr('加载中…', 'Loading…')}</div>
           ) : incident ? (
             <div className="space-y-6 px-6 py-6">
+              <IncidentClosurePanel incident={incident} events={events} />
               <InvestigationReportPanel incidentId={incident.id} />
+              <WorkflowRunsPanel incidentId={incident.id} />
               <AIInitialDiagnosisPanel incident={incident} events={events} />
               <AgentTimelinePanel incidentId={incident.id} />
               <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
@@ -274,6 +303,10 @@ function Header({
               </span>
               <span>{tr('最近：', 'Last: ')}{relativeTime(incident.last_fired_at)}</span>
               <span>{tr('次数：', 'Count: ')}{incident.event_count}</span>
+              <span>{tr('来源：', 'Source: ')}{sourceLabel(incident.source_type)}</span>
+              {incident.source_type === 'alertmanager_external' && !(incident.target_type === 'edge' && incident.target_id) && (
+                <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-amber-300">待关联资产</span>
+              )}
               {incident.acknowledged_at && (
                 <span>{tr('已确认：', 'Acked: ')}{relativeTime(incident.acknowledged_at)}</span>
               )}
@@ -370,6 +403,463 @@ function Header({
   );
 }
 
+function IncidentClosurePanel({ incident, events }: { incident: Incident; events: IncidentEvent[] }) {
+  const { tr } = useI18n();
+  const [report, setReport] = useState<InvestigationReport | null>(null);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [reports, setReports] = useState<ReportListItem[]>([]);
+  const [copied, setCopied] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [archivedId, setArchivedId] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    getIncidentInvestigation(incident.id)
+      .then((r) => {
+        if (!cancelled) setReport(r);
+      })
+      .catch(() => {
+        if (!cancelled) setReport(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [incident.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.allSettled([
+      listApprovals(),
+      listReports({ limit: 4, status: 'ready' }),
+    ]).then((results) => {
+      if (cancelled) return;
+      const [approvalRes, reportRes] = results;
+      if (approvalRes.status === 'fulfilled') {
+        setApprovals(filterIncidentApprovals(approvalRes.value.items ?? [], incident.id, report?.audit_session_id));
+      }
+      if (reportRes.status === 'fulfilled') {
+        setReports(reportRes.value.reports ?? []);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [incident.id, report?.audit_session_id]);
+
+  const riskyActions = useMemo(
+    () => (report?.suggested_actions ?? []).filter((a) => a.category === 'mutate' || a.danger === 'high' || a.danger === 'medium'),
+    [report?.suggested_actions],
+  );
+  const rcaReady = report?.status === 'ready';
+  const acknowledged =
+    incident.status === 'acknowledged' ||
+    incident.status === 'resolved' ||
+    Boolean(incident.acknowledged_at) ||
+    events.some((e) => e.event_type === 'acknowledged');
+  const resolved = incident.status === 'resolved';
+  const hasReportOutput = rcaReady || reports.length > 0;
+  const pendingApprovalCount = approvals.filter((a) => a.status === 'pending').length;
+  const approvalStatusSummary = approvals.length > 0
+    ? approvals.map((a) => `${statusLabelForApproval(a.status)}：${a.title}`).slice(0, 3).join('；')
+    : '';
+  const auditHref = report ? buildInvestigationAuditHref(report) : '';
+  const rcaMarkdown = report && rcaReady ? buildRcaMarkdown(report, incident.id) : '';
+
+  const copyRca = async () => {
+    if (!rcaMarkdown) return;
+    await navigator.clipboard.writeText(rcaMarkdown);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2200);
+  };
+
+  const downloadRca = () => {
+    if (!rcaMarkdown) return;
+    downloadMarkdown(`rca-incident-${incident.id}.md`, rcaMarkdown);
+  };
+
+  const archiveRca = async () => {
+    if (!rcaMarkdown || archiving) return;
+    setArchiving(true);
+    try {
+      const rpt = await archiveReport({
+        title: `RCA 报告 - Incident #${incident.id}`,
+        kind: 'custom',
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        scope_json: JSON.stringify({ template: 'rca', incident_id: incident.id, investigation_id: report?.id }),
+        content_md: rcaMarkdown,
+        summary: report?.root_cause || incident.summary || `Incident #${incident.id} RCA`,
+        task_id: `incident:${incident.id}`,
+      });
+      setArchivedId(rpt.id);
+      setReports((cur) => [rpt, ...cur.filter((x) => x.id !== rpt.id)].slice(0, 4));
+    } catch (e) {
+      window.alert((e as Error).message || '归档 RCA 报告失败');
+    } finally {
+      setArchiving(false);
+    }
+  };
+
+  return (
+    <section className="rounded-xl border border-indigo-500/20 bg-zinc-950/50 shadow-sm">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 px-4 py-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <GitBranch size={15} className="text-indigo-300" />
+            <h2 className="text-sm font-semibold text-zinc-100">{tr('事件处置闭环', 'Incident closure loop')}</h2>
+            <span className={cn(
+              'rounded-md px-1.5 py-0.5 text-[10px] font-medium',
+              resolved && rcaReady && pendingApprovalCount === 0
+                ? 'bg-emerald-500/15 text-emerald-200'
+                : 'bg-amber-500/15 text-amber-200',
+            )}>
+              {resolved && rcaReady && pendingApprovalCount === 0 ? tr('已闭环', 'Closed') : tr('进行中', 'In progress')}
+            </span>
+          </div>
+          <p className="mt-1 text-[12px] text-zinc-500">
+            {tr('从告警触发到 RCA、人工确认、报告输出，统一放在当前事件上下文中。', 'Alert, RCA, human confirmation, and report output in one incident context.')}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            to="/approvals"
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+          >
+            <CheckCircle2 size={13} />
+            {tr('人工确认', 'Approvals')}
+            {pendingApprovalCount > 0 && <span className="font-mono text-amber-300">{pendingApprovalCount}</span>}
+          </Link>
+          {auditHref && (
+            <Link
+              to={auditHref}
+              className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+            >
+              <ExternalLink size={13} />
+              {tr('审计上下文', 'Audit context')}
+            </Link>
+          )}
+          <Link
+            to="/reports"
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+          >
+            <FileText size={13} />
+            {tr('报告中心', 'Reports')}
+          </Link>
+        </div>
+      </header>
+
+      <div className="grid grid-cols-1 gap-3 px-4 py-3 lg:grid-cols-4">
+        <ClosureStep
+          index={1}
+          title={tr('告警受理', 'Triage')}
+          state={acknowledged ? 'done' : 'todo'}
+          detail={acknowledged ? tr('已 Ack 或进入处置状态', 'Acknowledged or already being handled') : tr('等待 Ack，明确负责人和处置窗口', 'Awaiting Ack, owner, and handling window')}
+          meta={incident.fired_at ? relativeTime(incident.fired_at) : undefined}
+        />
+        <ClosureStep
+          index={2}
+          title="RCA"
+          state={rcaReady ? 'done' : report?.status === 'running' || report?.status === 'pending' ? 'active' : 'todo'}
+          detail={rcaReady ? report?.root_cause || tr('根因报告已生成', 'Root cause report is ready') : tr('等待自动调查或手动触发分析', 'Waiting for auto investigation or manual analysis')}
+          meta={report?.status}
+        />
+        <ClosureStep
+          index={3}
+          title={tr('人工确认', 'Human confirmation')}
+          state={pendingApprovalCount > 0 ? 'active' : approvals.length > 0 ? 'done' : riskyActions.length > 0 ? 'todo' : 'done'}
+          detail={
+            pendingApprovalCount > 0
+              ? tr(`有 ${pendingApprovalCount} 个待确认动作`, `${pendingApprovalCount} action(s) awaiting approval`)
+              : approvals.length > 0
+                ? approvalStatusSummary
+              : riskyActions.length > 0
+                ? tr('存在高风险建议动作，执行前需要人工确认', 'Risky suggested actions require confirmation before execution')
+                : tr('暂无需要审批的高风险动作', 'No risky actions awaiting approval')
+          }
+          meta={approvals.length > 0 ? `${approvals.length} actions` : riskyActions.length > 0 ? `${riskyActions.length} actions` : undefined}
+        />
+        <ClosureStep
+          index={4}
+          title={tr('报告输出', 'Report')}
+          state={hasReportOutput ? 'done' : 'todo'}
+          detail={rcaReady ? tr('RCA 报告可复制或导出 Markdown', 'RCA can be copied or exported as Markdown') : tr('RCA 完成后生成报告材料', 'Report material becomes available after RCA')}
+          meta={reports.length > 0 ? tr(`报告中心 ${reports.length} 条`, `${reports.length} recent report(s)`) : undefined}
+        />
+      </div>
+
+      {approvals.length > 0 && (
+        <div className="border-t border-zinc-800/70 px-4 py-3">
+          <div className="mb-2 text-[11px] font-medium text-zinc-500">人工确认记录</div>
+          <div className="space-y-2">
+            {approvals.map((approval) => (
+              <div key={approval.id} className="flex flex-wrap items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+                <span className={cn(
+                  'rounded px-1.5 py-0.5 text-[10px] font-medium',
+                  approval.status === 'pending'
+                    ? 'bg-amber-500/15 text-amber-300'
+                    : approval.status === 'approved' || approval.status === 'executed'
+                      ? 'bg-emerald-500/15 text-emerald-300'
+                      : 'bg-red-500/15 text-red-300',
+                )}>
+                  {statusLabelForApproval(approval.status)}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-xs text-zinc-200">{approval.title}</span>
+                <span className="text-[10px] text-zinc-500">{approval.source_type || approval.source}</span>
+                <span className="text-[10px] text-zinc-600">{relativeTime(approval.decided_at || approval.created_at)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(riskyActions.length > 0 || rcaReady) && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800/70 px-4 py-3">
+          <div className="min-w-0 text-[12px] text-zinc-400">
+            {riskyActions.length > 0 ? (
+              <span>
+                {tr('建议动作：', 'Suggested actions: ')}
+                <span className="text-zinc-200">{riskyActions.slice(0, 2).map((a) => a.label).join(' / ')}</span>
+                {riskyActions.length > 2 && <span className="text-zinc-500"> +{riskyActions.length - 2}</span>}
+              </span>
+            ) : (
+              <span>{tr('RCA 已完成，可进入处置确认和报告归档。', 'RCA is ready for confirmation and report archival.')}</span>
+            )}
+          </div>
+          {rcaReady && (
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={copyRca}
+                className="inline-flex items-center gap-1.5 rounded-md border border-emerald-700/60 bg-emerald-950/30 px-2.5 py-1.5 text-xs text-emerald-200 hover:bg-emerald-900/40"
+              >
+                <ClipboardCopy size={13} />
+                {copied ? tr('已复制', 'Copied') : tr('复制 RCA', 'Copy RCA')}
+              </button>
+              <button
+                type="button"
+                onClick={downloadRca}
+                className="inline-flex items-center gap-1.5 rounded-md border border-emerald-700/60 bg-emerald-950/30 px-2.5 py-1.5 text-xs text-emerald-200 hover:bg-emerald-900/40"
+              >
+                <Download size={13} />
+                Markdown
+              </button>
+              {archivedId ? (
+                <Link
+                  to={`/reports/${archivedId}`}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-indigo-700/60 bg-indigo-950/30 px-2.5 py-1.5 text-xs text-indigo-200 hover:bg-indigo-900/40"
+                >
+                  <FileText size={13} />
+                  查看归档
+                </Link>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void archiveRca()}
+                  disabled={archiving}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-indigo-700/60 bg-indigo-950/30 px-2.5 py-1.5 text-xs text-indigo-200 hover:bg-indigo-900/40 disabled:opacity-50"
+                >
+                  {archiving ? <Loader2 size={13} className="animate-spin" /> : <FileText size={13} />}
+                  归档报告
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ClosureStep({
+  index,
+  title,
+  state,
+  detail,
+  meta,
+}: {
+  index: number;
+  title: string;
+  state: 'done' | 'active' | 'todo';
+  detail: string;
+  meta?: string;
+}) {
+  const stateCls =
+    state === 'done'
+      ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-200'
+      : state === 'active'
+        ? 'border-amber-500/30 bg-amber-500/5 text-amber-200'
+        : 'border-zinc-800 bg-zinc-900/40 text-zinc-300';
+  const dotCls = state === 'done' ? 'bg-emerald-400' : state === 'active' ? 'bg-amber-400' : 'bg-zinc-600';
+  return (
+    <div className={cn('min-h-[112px] rounded-lg border p-3', stateCls)}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className={cn('h-2 w-2 rounded-full', dotCls)} />
+          <span className="text-[11px] font-medium uppercase tracking-wider opacity-70">Step {index}</span>
+        </div>
+        {meta && <span className="truncate font-mono text-[10px] opacity-60">{meta}</span>}
+      </div>
+      <div className="mt-2 text-sm font-medium text-zinc-100">{title}</div>
+      <div className="mt-1 line-clamp-3 text-[12px] leading-relaxed text-zinc-400">{detail}</div>
+    </div>
+  );
+}
+
+function filterIncidentApprovals(items: Approval[], incidentId: number, sessionId?: string): Approval[] {
+  const incidentNeedle = `incident_id=${incidentId}`;
+  const idNeedle = `incident ${incidentId}`;
+  const hashNeedle = `#${incidentId}`;
+  return items.filter((a) => {
+    if (a.incident_id === incidentId) return true;
+    if (sessionId && a.session_id === sessionId) return true;
+    const hay = `${a.title}\n${a.summary}\n${a.payload}`.toLowerCase();
+    return (
+      hay.includes(incidentNeedle.toLowerCase()) ||
+      hay.includes(idNeedle.toLowerCase()) ||
+      hay.includes(hashNeedle.toLowerCase())
+    );
+  });
+}
+
+function statusLabelForApproval(status: Approval['status']): string {
+  return ({ pending: '待确认', approved: '已批准', rejected: '已拒绝', executed: '已执行', failed: '执行失败' })[status] || status;
+}
+
+function downloadMarkdown(filename: string, markdown: string) {
+  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function WorkflowRunsPanel({ incidentId }: { incidentId: number }) {
+  const navigate = useNavigate();
+  const [rows, setRows] = useState<Array<{ flow: Flow; run: FlowRun }>>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const flows = await listFlows({ limit: 100 });
+      const pairs = await Promise.all(
+        (flows.items ?? []).map(async (flow) => {
+          const runs = await listFlowRuns(flow.id, 20).catch(() => ({ items: [] as FlowRun[] }));
+          return (runs.items ?? [])
+            .filter((run) => triggerIncidentID(run.trigger) === incidentId)
+            .map((run) => ({ flow, run }));
+        }),
+      );
+      setRows(pairs.flat().sort((a, b) => new Date(b.run.created_at).getTime() - new Date(a.run.created_at).getTime()));
+      setErr('');
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [incidentId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return (
+    <section className="rounded-xl border border-zinc-800/60 bg-zinc-900/40 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
+            <GitBranch size={15} className="text-indigo-300" />
+            关联工作流
+          </div>
+          <div className="mt-0.5 text-xs text-zinc-500">
+            展示由当前事件触发或手动带入 incident_id 的 workflow run，可回跳编排编辑器查看上下文。
+          </div>
+        </div>
+        <Button variant="ghost" onClick={() => void refresh()} disabled={loading}>
+          <RefreshCw size={12} className={cn(loading && 'animate-spin')} />
+          刷新
+        </Button>
+      </div>
+      {err && <div className="mt-3 rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">{err}</div>}
+      {loading ? (
+        <div className="mt-3 text-xs text-zinc-500">加载工作流运行记录...</div>
+      ) : rows.length === 0 ? (
+        <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/30 px-3 py-3 text-xs text-zinc-500">
+          暂无关联 workflow run。启用“告警自动调查”模板后，新事件会在这里出现编排记录。
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {rows.slice(0, 6).map(({ flow, run }) => (
+            <button
+              key={run.id}
+              type="button"
+              onClick={() => navigate(`/workflows/${flow.id}`)}
+              className="flex w-full items-center gap-3 rounded-md border border-zinc-800 bg-zinc-950/30 px-3 py-2 text-left hover:border-zinc-700"
+            >
+              <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full', runStatusDot(run.status))} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm text-zinc-100">{flow.name}</div>
+                <div className="mt-0.5 truncate text-xs text-zinc-500">
+                  run {run.id.slice(0, 8)} · {runStatusText(run.status)} · {relativeTime(run.created_at)}
+                </div>
+              </div>
+              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                {flow.trigger_type === 'trigger.alert_fired' ? '告警触发' : run.trigger_type || 'manual'}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function triggerIncidentID(trigger: Record<string, unknown> | undefined): number | null {
+  if (!trigger) return null;
+  const raw = trigger.incident_id ?? trigger.incidentId;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function runStatusDot(status: string): string {
+  switch (status) {
+    case 'succeeded':
+      return 'bg-emerald-400';
+    case 'failed':
+      return 'bg-red-400';
+    case 'running':
+    case 'pending':
+      return 'bg-indigo-400';
+    default:
+      return 'bg-zinc-500';
+  }
+}
+
+function runStatusText(status: string): string {
+  switch (status) {
+    case 'succeeded':
+      return '成功';
+    case 'failed':
+      return '失败';
+    case 'running':
+      return '运行中';
+    case 'pending':
+      return '等待中';
+    case 'canceled':
+      return '已取消';
+    default:
+      return status;
+  }
+}
+
 // InvestigationReportPanel renders the structured root-cause report
 // produced by the per-alert investigator (PR-2/3). Status drives the
 // UI:
@@ -387,7 +877,11 @@ function InvestigationReportPanel({ incidentId }: { incidentId: number }) {
   const [report, setReport] = useState<InvestigationReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [expandFindings, setExpandFindings] = useState(false);
+  const [expandToolCalls, setExpandToolCalls] = useState(false);
+  const [toolCalls, setToolCalls] = useState<InvestigationToolCall[]>([]);
+  const [toolCallsErr, setToolCallsErr] = useState<string | null>(null);
   const [triggering, setTriggering] = useState(false);
+  const [copiedReport, setCopiedReport] = useState(false);
   // Counts how many consecutive not_started polls we've done. Caps at
   // NOT_STARTED_MAX_POLLS (≈ 30 s) before we stop polling and show the
   // manual "run now" CTA — historical bug (v0.7.49) was: incidents
@@ -433,6 +927,31 @@ function InvestigationReportPanel({ incidentId }: { incidentId: number }) {
       if (timer) window.clearTimeout(timer);
     };
   }, [incidentId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (report?.status !== 'ready' || (report.tool_call_count ?? 0) <= 0) {
+      setToolCalls([]);
+      setToolCallsErr(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    listInvestigationToolCalls(incidentId)
+      .then((r) => {
+        if (cancelled) return;
+        setToolCalls(r.items ?? []);
+        setToolCallsErr(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setToolCalls([]);
+        setToolCallsErr(e instanceof ApiError ? e.message : (e as Error).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [incidentId, report?.status, report?.tool_call_count, report?.audit_session_id]);
 
   // Manual enqueue — POST /v1/alerts/incidents/{id}/investigation. On
   // success the polling effect's next tick (re-armed by setReport
@@ -580,6 +1099,32 @@ function InvestigationReportPanel({ incidentId }: { incidentId: number }) {
   const targetStr = formatTarget(target);
   const evidence = report.evidence ?? [];
   const actions = report.suggested_actions ?? [];
+  const confidenceFactors = formatConfidenceFactors(report.confidence_factors);
+  const hasProvenance =
+    !!report.worker_id ||
+    !!report.audit_session_id ||
+    confidenceFactors.length > 0 ||
+    (report.tool_call_count ?? 0) > 0;
+  const auditHref = buildInvestigationAuditHref(report);
+  const reportMarkdown = buildRcaMarkdown(report, incidentId);
+
+  const copyReport = async () => {
+    await navigator.clipboard.writeText(reportMarkdown);
+    setCopiedReport(true);
+    window.setTimeout(() => setCopiedReport(false), 2500);
+  };
+
+  const downloadReport = () => {
+    const blob = new Blob([reportMarkdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `rca-incident-${incidentId}.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <section className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 shadow-sm">
@@ -605,6 +1150,22 @@ function InvestigationReportPanel({ incidentId }: { incidentId: number }) {
           )}
           {report.ready_at && <span>{relativeTime(report.ready_at)}</span>}
           <button
+            type="button"
+            onClick={copyReport}
+            className="inline-flex items-center gap-1 rounded border border-emerald-400/40 bg-emerald-400/10 px-2 py-0.5 text-[11px] text-emerald-200 hover:bg-emerald-400/20"
+          >
+            <ClipboardCopy size={11} />
+            {copiedReport ? '已复制' : '复制报告'}
+          </button>
+          <button
+            type="button"
+            onClick={downloadReport}
+            className="inline-flex items-center gap-1 rounded border border-emerald-400/40 bg-emerald-400/10 px-2 py-0.5 text-[11px] text-emerald-200 hover:bg-emerald-400/20"
+          >
+            <Download size={11} />
+            导出 Markdown
+          </button>
+          <button
             onClick={triggerNow}
             disabled={triggering}
             className="rounded border border-emerald-400/40 bg-emerald-400/10 px-2 py-0.5 text-[11px] text-emerald-200 hover:bg-emerald-400/20 disabled:opacity-50"
@@ -615,6 +1176,59 @@ function InvestigationReportPanel({ incidentId }: { incidentId: number }) {
       </header>
 
       <div className="space-y-3 px-4 py-3 text-[13px] text-zinc-100">
+        {hasProvenance && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-emerald-500/10 pb-3 text-[11px] text-zinc-400">
+            {report.worker_id && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1">
+                <span className="text-zinc-500">worker</span>
+                <span className="font-mono text-zinc-300">{shortId(report.worker_id)}</span>
+              </span>
+            )}
+            {report.audit_session_id && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1">
+                <span className="text-zinc-500">audit</span>
+                <span className="font-mono text-zinc-300">{shortId(report.audit_session_id)}</span>
+              </span>
+            )}
+            {report.audit_session_id && (
+              <Link
+                to={`/chat/${encodeURIComponent(report.audit_session_id)}`}
+                className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1 text-zinc-300 hover:border-emerald-500/40 hover:text-emerald-200"
+              >
+                session
+              </Link>
+            )}
+            {auditHref && (
+              <Link
+                to={auditHref}
+                className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1 text-zinc-300 hover:border-emerald-500/40 hover:text-emerald-200"
+              >
+                audit log
+              </Link>
+            )}
+            {(report.tool_call_count ?? 0) > 0 && (
+              <button
+                type="button"
+                onClick={() => setExpandToolCalls((v) => !v)}
+                className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1 hover:border-emerald-500/40 hover:text-emerald-200"
+              >
+                <span className="text-zinc-500">tools</span>
+                <span className="font-mono text-zinc-300">{report.tool_call_count}</span>
+              </button>
+            )}
+            {confidenceFactors.map((f) => (
+              <span
+                key={f.key}
+                title={`${f.key}: ${f.value}`}
+                className="inline-flex max-w-full items-center gap-1 rounded-md border border-emerald-500/20 bg-emerald-500/5 px-2 py-1"
+              >
+                <span className="max-w-[9rem] truncate text-emerald-300/70">{f.key}</span>
+                <span className="max-w-[12rem] truncate font-mono text-zinc-300">{f.value}</span>
+              </span>
+            ))}
+          </div>
+        )}
+
         {report.root_cause && (
           <div>
             <div className="mb-1 text-[11px] uppercase tracking-wider text-emerald-300/70">
@@ -648,17 +1262,98 @@ function InvestigationReportPanel({ incidentId }: { incidentId: number }) {
             </div>
             <ol className="space-y-1 text-[12px]">
               {evidence.map((e, i) => (
-                <li key={i} className="flex gap-2">
+                <li key={i} className="flex flex-wrap items-start gap-2">
                   <span className="text-zinc-500">{e.step ?? i + 1}.</span>
                   {e.tool && (
                     <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300">
                       {e.tool}
                     </span>
                   )}
-                  <span className="text-zinc-300">{e.summary}</span>
+                  {e.tool_call_id && (
+                    <span
+                      title={e.tool_call_id}
+                      className="rounded border border-zinc-800 bg-zinc-950/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500"
+                    >
+                      call:{shortId(e.tool_call_id)}
+                    </span>
+                  )}
+                  <span className="min-w-0 flex-1 text-zinc-300">{e.summary}</span>
                 </li>
               ))}
             </ol>
+          </div>
+        )}
+
+        {(toolCalls.length > 0 || toolCallsErr) && (
+          <div>
+            <button
+              type="button"
+              onClick={() => setExpandToolCalls((v) => !v)}
+              className="mb-1 inline-flex items-center gap-1 text-[11px] font-medium uppercase tracking-wider text-emerald-300/70 hover:text-emerald-200"
+            >
+              {expandToolCalls ? '▾' : '▸'} {tr('工具调用', 'Tool calls')}
+              {toolCalls.length > 0 && (
+                <span className="font-mono normal-case text-zinc-500">({toolCalls.length})</span>
+              )}
+            </button>
+            {toolCallsErr ? (
+              <div className="rounded border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-[12px] text-red-300">
+                {toolCallsErr}
+              </div>
+            ) : expandToolCalls ? (
+              <ul className="space-y-2">
+                {toolCalls.map((tc) => (
+                  <li key={tc.id} className="rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-2">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                      <span className={cn('rounded px-1.5 py-0.5 font-mono', toolCallStatusClass(tc.status))}>
+                        {tc.status}
+                      </span>
+                      <span className="font-mono text-zinc-200">{tc.tool_name}</span>
+                      <span title={tc.id} className="font-mono text-zinc-500">call:{shortId(tc.id)}</span>
+                      {tc.llm_call_id && (
+                        <span title={tc.llm_call_id} className="font-mono text-zinc-600">llm:{shortId(tc.llm_call_id)}</span>
+                      )}
+                      {tc.device_id != null && <span className="font-mono text-zinc-500">device={tc.device_id}</span>}
+                      {tc.duration_ms != null && <span className="font-mono text-zinc-500">{tc.duration_ms}ms</span>}
+                      {report.audit_session_id && (
+                        <Link
+                          to={`/chat/${encodeURIComponent(report.audit_session_id)}`}
+                          className="text-emerald-300 hover:text-emerald-200"
+                        >
+                          session
+                        </Link>
+                      )}
+                      {auditHref && (
+                        <Link to={auditHref} className="text-emerald-300 hover:text-emerald-200">
+                          audit
+                        </Link>
+                      )}
+                    </div>
+                    {tc.error && <div className="mt-1 text-[11px] text-red-300">{tc.error}</div>}
+                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                      <ToolCallJSONBlock label="args" value={tc.arguments} />
+                      <ToolCallJSONBlock label="result" value={tc.result} />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <ul className="flex flex-wrap gap-1.5">
+                {toolCalls.map((tc) => (
+                  <li key={tc.id}>
+                    <span
+                      title={`${tc.tool_name}${tc.duration_ms != null ? ` ${tc.duration_ms}ms` : ''}`}
+                      className={cn(
+                        'inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[10px]',
+                        toolCallStatusClass(tc.status),
+                      )}
+                    >
+                      {tc.tool_name}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
@@ -790,6 +1485,25 @@ function DangerBadge({ danger, category }: { danger?: string; category?: string 
   );
 }
 
+function ToolCallJSONBlock({ label, value }: { label: string; value: unknown }) {
+  if (value == null || value === '') return null;
+  return (
+    <div className="min-w-0">
+      <div className="mb-1 font-mono text-[10px] uppercase text-zinc-600">{label}</div>
+      <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-all rounded border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[10px] leading-relaxed text-zinc-400">
+        {prettifyJSON(value)}
+      </pre>
+    </div>
+  );
+}
+
+function toolCallStatusClass(status: string): string {
+  if (status === 'success') return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200';
+  if (status === 'error' || status === 'timeout') return 'border-red-500/30 bg-red-500/10 text-red-200';
+  if (status === 'pending') return 'border-indigo-500/30 bg-indigo-500/10 text-indigo-200';
+  return 'border-zinc-700 bg-zinc-800 text-zinc-300';
+}
+
 function formatTarget(t: Record<string, unknown>): string {
   if (!t || Object.keys(t).length === 0) return '';
   const parts: string[] = [];
@@ -815,6 +1529,117 @@ function formatElapsed(ms: number): string {
   const m = Math.floor(ms / 60_000);
   const s = Math.floor((ms % 60_000) / 1000);
   return `${m}m${s}s`;
+}
+
+function shortId(id: string): string {
+  const v = String(id || '').trim();
+  if (v.length <= 12) return v;
+  return `${v.slice(0, 8)}...${v.slice(-4)}`;
+}
+
+function buildInvestigationAuditHref(report: InvestigationReport): string {
+  const qs = new URLSearchParams();
+  qs.set('action', 'skill_execute');
+  qs.set('resource_type', 'skill');
+  qs.set('limit', '100');
+  if (!report.id && !report.audit_session_id) return '';
+  return `/admin/audit?${qs.toString()}`;
+}
+
+function buildRcaMarkdown(report: InvestigationReport, incidentId: number): string {
+  const lines: string[] = [];
+  lines.push(`# RCA 报告 - Incident #${incidentId}`);
+  lines.push('');
+  lines.push(`- 状态: ${report.status}`);
+  if (report.confidence != null) lines.push(`- 置信度: ${Math.round(report.confidence * 100)}%`);
+  if (report.worker_id) lines.push(`- Worker: ${report.worker_id}`);
+  if (report.audit_session_id) lines.push(`- 会话: ${report.audit_session_id}`);
+  if (report.created_at) lines.push(`- 创建时间: ${report.created_at}`);
+  if (report.ready_at) lines.push(`- 完成时间: ${report.ready_at}`);
+  lines.push('');
+
+  if (report.root_cause) {
+    lines.push('## 根因');
+    lines.push('');
+    lines.push(report.root_cause);
+    lines.push('');
+  }
+  if (report.affected_window || report.pinpointed_target) {
+    lines.push('## 影响范围');
+    lines.push('');
+    if (report.affected_window) lines.push(`- 窗口: ${report.affected_window}`);
+    const target = formatTarget(report.pinpointed_target ?? {});
+    if (target) lines.push(`- 对象: ${target}`);
+    lines.push('');
+  }
+  if ((report.evidence ?? []).length > 0) {
+    lines.push('## 证据链');
+    lines.push('');
+    for (const e of report.evidence ?? []) {
+      const step = e.step ?? '-';
+      const tool = e.tool ? ` \`${e.tool}\`` : '';
+      const call = e.tool_call_id ? ` (${e.tool_call_id})` : '';
+      lines.push(`${step}.${tool}${call} ${e.summary ?? ''}`);
+    }
+    lines.push('');
+  }
+  if ((report.suggested_actions ?? []).length > 0) {
+    lines.push('## 建议动作');
+    lines.push('');
+    for (const a of report.suggested_actions ?? []) {
+      const command = a.command ? ` \`${a.command}\`` : '';
+      lines.push(`- [${a.category ?? 'action'} / ${a.danger ?? 'none'}] ${a.label}${command}`);
+    }
+    lines.push('');
+  }
+  if (report.findings_md) {
+    lines.push('## 完整分析');
+    lines.push('');
+    lines.push(report.findings_md);
+    lines.push('');
+  }
+  lines.push('> 本报告由 LLM 综合生成，关键决策请二次核验。');
+  return lines.join('\n');
+}
+
+function formatConfidenceFactors(factors?: Record<string, unknown>): Array<{ key: string; value: string }> {
+  if (!factors) return [];
+  return Object.entries(factors)
+    .map(([key, value]) => ({ key, value: formatFactorValue(value) }))
+    .filter((item) => item.value !== '');
+}
+
+function formatFactorValue(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    return value.map(formatFactorValue).filter(Boolean).join(', ');
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function prettifyJSON(value: unknown): string {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        return JSON.stringify(JSON.parse(trimmed), null, 2);
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 // AIInitialDiagnosisPanel renders the proactive AI investigation result
@@ -1371,6 +2196,10 @@ function EventTypeBadge({ type }: { type: string }) {
         <X size={10} />
       ) : type === 'ai_initial_diagnosis' ? (
         <Sparkles size={10} />
+      ) : type === 'approval_approved' || type === 'action_executed' ? (
+        <CheckCircle2 size={10} />
+      ) : type === 'approval_rejected' || type === 'action_failed' ? (
+        <X size={10} />
       ) : (
         <Siren size={10} />
       )}
@@ -1384,10 +2213,14 @@ function eventTypeStyles(type: string): string {
     case 'firing':
     case 'reopened':
     case 'notification_failed':
+    case 'approval_rejected':
+    case 'action_failed':
       return 'bg-red-500/10 text-red-300 ring-red-500/30';
     case 'acknowledged':
       return 'bg-blue-500/10 text-blue-300 ring-blue-500/30';
     case 'resolved':
+    case 'approval_approved':
+    case 'action_executed':
       return 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/30';
     case 'notification_sent':
       return 'bg-indigo-500/10 text-indigo-300 ring-indigo-500/30';
@@ -1426,6 +2259,14 @@ function humanizeEventType(type: string): string {
       return 'note';
     case 'ai_initial_diagnosis':
       return trInline('AI 初查', 'AI initial diagnosis');
+    case 'approval_approved':
+      return trInline('人工确认已批准', 'Approval approved');
+    case 'approval_rejected':
+      return trInline('人工确认已拒绝', 'Approval rejected');
+    case 'action_executed':
+      return trInline('建议动作已执行', 'Action executed');
+    case 'action_failed':
+      return trInline('建议动作执行失败', 'Action failed');
     default:
       return type;
   }

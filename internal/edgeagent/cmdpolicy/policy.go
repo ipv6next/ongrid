@@ -35,11 +35,11 @@ const (
 // counts. Operators extend via LoadFromYAML.
 func DefaultReadOnly() *Policy {
 	p := &Policy{
-		bins:        map[string]*BinaryPolicy{},
-		StdoutCap:   defaultStdoutCap,
-		StderrCap:   defaultStderrCap,
-		Timeout:     defaultTimeout,
-		MaxArgs:     defaultMaxArgs,
+		bins:      map[string]*BinaryPolicy{},
+		StdoutCap: defaultStdoutCap,
+		StderrCap: defaultStderrCap,
+		Timeout:   defaultTimeout,
+		MaxArgs:   defaultMaxArgs,
 		PathAllowlist: []string{
 			"/var", "/opt", "/home", "/tmp", "/srv", "/data",
 		},
@@ -502,6 +502,42 @@ func (p *Policy) addBin(bp *BinaryPolicy) {
 	p.bins[bp.Bin] = bp
 }
 
+// EnableDockerReadOnly adds the curated Docker inspection surface to a
+// baseline policy. Unknown or mutating subcommands fall through to the
+// ClassMixed deny default.
+func EnableDockerReadOnly(p *Policy) *Policy {
+	if p == nil {
+		p = DefaultReadOnly()
+	}
+	p.addBin(&BinaryPolicy{
+		Bin:   "docker",
+		Class: ClassMixed,
+		ReadOnlyMatchers: []ArgMatcher{
+			{Subcmd: "version"}, {Subcmd: "info"}, {Subcmd: "ps"},
+			{Subcmd: "inspect"}, {Subcmd: "logs"}, {Subcmd: "stats"},
+			{Subcmd: "top"}, {Subcmd: "port"}, {Subcmd: "images"},
+			{SubcmdPath: []string{"network", "ls"}},
+			{SubcmdPath: []string{"network", "inspect"}},
+			{SubcmdPath: []string{"volume", "ls"}},
+			{SubcmdPath: []string{"volume", "inspect"}},
+			{SubcmdPath: []string{"compose", "ps"}},
+			{SubcmdPath: []string{"compose", "config"}},
+			{SubcmdPath: []string{"compose", "logs"}},
+			{SubcmdPath: []string{"compose", "images"}},
+			{SubcmdPath: []string{"compose", "top"}},
+		},
+		WriteMatchers: []ArgMatcher{
+			{AnyFlag: []string{
+				"run", "exec", "start", "stop", "restart", "kill", "rm", "rmi",
+				"pull", "push", "build", "create", "update", "prune", "up", "down",
+				"cp", "commit", "rename", "pause", "unpause",
+			}},
+		},
+	})
+	p.bins["docker"].AbsPath = discoverBin("docker")
+	return p
+}
+
 // Lookup returns the per-binary policy by basename (no path component),
 // or nil when the binary is not in the policy at all (treated as
 // "denied — unknown binary" by the caller).
@@ -552,11 +588,11 @@ func discoverBin(name string) string {
 // to add / replace; everything else is taken from base.
 type yamlPolicy struct {
 	Binaries []struct {
-		Name             string         `yaml:"name"`
-		Class            string         `yaml:"class"`
-		ReadOnlyMatchers []yamlMatcher  `yaml:"read_only_matchers"`
-		WriteMatchers    []yamlMatcher  `yaml:"write_matchers"`
-		DeniedArgs       []string       `yaml:"denied_args"`
+		Name             string        `yaml:"name"`
+		Class            string        `yaml:"class"`
+		ReadOnlyMatchers []yamlMatcher `yaml:"read_only_matchers"`
+		WriteMatchers    []yamlMatcher `yaml:"write_matchers"`
+		DeniedArgs       []string      `yaml:"denied_args"`
 	} `yaml:"binaries"`
 	NetworkHostAllowlist []string `yaml:"network_host_allowlist"`
 	StdoutCapBytes       int      `yaml:"stdout_cap_bytes"`

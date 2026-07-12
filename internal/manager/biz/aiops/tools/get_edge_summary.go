@@ -113,9 +113,11 @@ func (r *Registry) executeGetEdgeSummary(ctx context.Context, args json.RawMessa
 	// Roles now live on the host Device (post device-split). Look it up
 	// best-effort via Edge.DeviceID; missing device row → empty roles.
 	var roles []string
+	var assetProfile *AssetProfile
 	if r.devices != nil && edge.DeviceID != nil {
 		if d, derr := r.devices.Get(callCtx, *edge.DeviceID); derr == nil && d != nil {
 			roles = devicemodel.DecodeRoles(d.Roles)
+			assetProfile = assetProfileFromDevice(d)
 		}
 	}
 	if roles == nil {
@@ -123,13 +125,14 @@ func (r *Registry) executeGetEdgeSummary(ctx context.Context, args json.RawMessa
 	}
 	out := map[string]any{
 		"edge": map[string]any{
-			"id":           edge.ID,
-			"device_id":    edge.DeviceID,
-			"name":         edge.Name,
-			"status":       edge.Status,
-			"roles":        roles,
-			"last_seen_at": edge.LastSeenAt,
-			"created_at":   edge.CreatedAt,
+			"id":            edge.ID,
+			"device_id":     edge.DeviceID,
+			"name":          edge.Name,
+			"status":        edge.Status,
+			"roles":         roles,
+			"asset_profile": assetProfile,
+			"last_seen_at":  edge.LastSeenAt,
+			"created_at":    edge.CreatedAt,
 		},
 	}
 

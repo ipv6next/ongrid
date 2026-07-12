@@ -21,6 +21,7 @@ import { useModelSelection } from '@/store/modelSelection';
 import { PromptCard } from '@/components/PromptCard';
 import { StatusRow } from '@/components/StatusRow';
 import { createSession, listModels, type LLMProvider } from '@/api/chat';
+import { listAgents, type AgentSummary } from '@/api/agents';
 import { setSetting, invalidateLLMRouter } from '@/api/settings';
 import { listEdges } from '@/api/edges';
 import { useI18n } from '@/i18n/locale';
@@ -158,6 +159,8 @@ export default function HomePage() {
   const selectedModel = storeModel ?? catalogDefault;
   // SearXNG ships zero-key zero-quota in our compose stack — leave on by default.
   const [webSearchEnabled, setWebSearchEnabled] = useState(true);
+  const [agents, setAgents] = useState<AgentSummary[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState('default');
 
   // 进首页时随机一条问候 + 4 张 prompt 卡；mount 期间不变。
   const greetingPair = useMemo(() => GREETINGS[Math.floor(Math.random() * GREETINGS.length)], []);
@@ -198,6 +201,9 @@ export default function HomePage() {
       .catch(() => {
         if (!cancelled) setProviders([]);
       });
+    listAgents()
+      .then((r) => setAgents(r.items ?? []))
+      .catch(() => setAgents([]));
     return () => {
       cancelled = true;
     };
@@ -232,7 +238,7 @@ export default function HomePage() {
       // Bind home-launched sessions to the virtual "default" persona —
       // shows the 默认 badge in sidebar/agents and uses the unrestricted
       // coordinator-equivalent toolBag on the backend.
-      const session = await createSession({ title, agent_id: 'default' });
+      const session = await createSession({ title, agent_id: selectedAgent });
       // Don't post here — ChatThread takes the initialPrompt and runs it
       // through the SSE streamMessage path so the user sees tool cards and
       // the assistant reply incrementally. The picked model rides the shared
@@ -255,6 +261,19 @@ export default function HomePage() {
           <h1 className="mb-8 mt-8 text-center text-3xl font-semibold tracking-tight text-zinc-100">
             {greeting}
           </h1>
+
+          <div className="mb-3 flex items-center justify-center gap-2 text-xs text-zinc-500">
+            <span>本次会话专家</span>
+            <select
+              value={selectedAgent}
+              onChange={(e) => setSelectedAgent(e.target.value)}
+              className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 outline-none focus:border-indigo-400"
+            >
+              {agents.length === 0 ? <option value="default">default</option> : agents.map((agent) => (
+                <option key={agent.name} value={agent.name}>{agent.name}</option>
+              ))}
+            </select>
+          </div>
 
           <ChatInput
             value={draft}

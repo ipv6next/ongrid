@@ -97,14 +97,15 @@ func TestMessageAndToolCallLifecycle(t *testing.T) {
 	if err := repo.CreateSession(ctx, s); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	base := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
 
 	content := "what's happening"
-	userMsg := &model.Message{SessionID: s.ID, Role: model.RoleUser, Content: &content, CreatedAt: time.Now().UTC()}
+	userMsg := &model.Message{SessionID: s.ID, Role: model.RoleUser, Content: &content, CreatedAt: base}
 	if err := repo.AppendMessage(ctx, userMsg); err != nil {
 		t.Fatalf("AppendMessage user: %v", err)
 	}
 
-	asstMsg := &model.Message{SessionID: s.ID, Role: model.RoleAssistant, Content: nil, CreatedAt: time.Now().UTC()}
+	asstMsg := &model.Message{SessionID: s.ID, Role: model.RoleAssistant, Content: nil, CreatedAt: base.Add(time.Second)}
 	if err := repo.AppendMessage(ctx, asstMsg); err != nil {
 		t.Fatalf("AppendMessage assistant: %v", err)
 	}
@@ -114,8 +115,8 @@ func TestMessageAndToolCallLifecycle(t *testing.T) {
 		ToolName:      "get_host_load",
 		ArgumentsJSON: `{"edge_name":"n"}`,
 		Status:        model.StatusPending,
-		StartedAt:     time.Now().UTC(),
-		CreatedAt:     time.Now().UTC(),
+		StartedAt:     base.Add(2 * time.Second),
+		CreatedAt:     base.Add(2 * time.Second),
 	}
 	if err := repo.CreateToolCall(ctx, tc); err != nil {
 		t.Fatalf("CreateToolCall: %v", err)
@@ -157,6 +158,67 @@ func TestMessageAndToolCallLifecycle(t *testing.T) {
 
 	// Interface compliance: the concrete *SessionRepo must satisfy biz.SessionRepo.
 	var _ biz.SessionRepo = repo
+}
+
+func TestListInvestigationToolCallsOnlyReturnsInvestigationSessions(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	inv := &model.Session{
+		UserID:    1,
+		Title:     "RCA #9",
+		Kind:      model.SessionKindInvestigation,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.CreateSession(ctx, inv); err != nil {
+		t.Fatalf("CreateSession investigation: %v", err)
+	}
+	user := &model.Session{
+		UserID:    1,
+		Title:     "operator chat",
+		Kind:      model.SessionKindUser,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := repo.CreateSession(ctx, user); err != nil {
+		t.Fatalf("CreateSession user: %v", err)
+	}
+
+	for _, sess := range []*model.Session{inv, user} {
+		msg := &model.Message{SessionID: sess.ID, Role: model.RoleAssistant, CreatedAt: now}
+		if err := repo.AppendMessage(ctx, msg); err != nil {
+			t.Fatalf("AppendMessage %s: %v", sess.Kind, err)
+		}
+		tc := &model.ToolCall{
+			MessageID:     msg.ID,
+			ToolName:      "host_bash",
+			ArgumentsJSON: `{"cmd":"uptime"}`,
+			Status:        model.StatusSuccess,
+			StartedAt:     now,
+			EndedAt:       &now,
+			CreatedAt:     now,
+		}
+		if err := repo.CreateToolCall(ctx, tc); err != nil {
+			t.Fatalf("CreateToolCall %s: %v", sess.Kind, err)
+		}
+	}
+
+	got, err := repo.ListInvestigationToolCalls(ctx, inv.ID)
+	if err != nil {
+		t.Fatalf("ListInvestigationToolCalls investigation: %v", err)
+	}
+	if len(got) != 1 || got[0].ToolName != "host_bash" {
+		t.Fatalf("investigation rows = %+v", got)
+	}
+	got, err = repo.ListInvestigationToolCalls(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("ListInvestigationToolCalls user: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("user session returned %d tool calls, want 0", len(got))
+	}
 }
 
 func strp(s string) *string { return &s }

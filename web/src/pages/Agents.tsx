@@ -1,32 +1,15 @@
-// Agents page (Phase 1 inventory + Phase 3 user-defined CRUD).
-//
-// What's here:
-//   - List every persona the chatruntime AgentRegistry has loaded —
-//     `default` (virtual) + specialist personas (`incident-investigator`,
-//     `specialist-sre`, `specialist-ops`, `specialist-network`,
-//     `specialist-disk`) + `reviewer` from agents/*.md
-//     (Source="disk", read-only), plus user-created ones
-//     (Source="user", editable + deletable).
-//   - Display order: default → specialists → reviewer → user-defined,
-//     so the top of the page reads like a triage rail (start here →
-//     specialists → SOP guard → custom).
-//   - "新建助理" button → modal with form for name / description /
-//     system_prompt / allowed_tools (multi-select from /v1/skills).
-//   - Delete button on user-defined cards (confirm modal).
-//   - "使用此助理" launches a new chat session pinned to this persona.
-//
-// The Side Panel will reuse the same /v1/agents data to populate its
-// agent switcher dropdown so this stays the single source.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Bot,
   Copy,
+  HardDrive,
   MessageSquarePlus,
   Pencil,
   Plus,
   RefreshCw,
   Search,
+  ShieldCheck,
   Trash2,
   Users,
 } from 'lucide-react';
@@ -37,7 +20,6 @@ import {
   createUserAgent,
   deleteAgent,
   listAgents,
-  localizedAgent,
   updateUserAgent,
   type AgentSource,
   type AgentSummary,
@@ -46,24 +28,95 @@ import {
 import { listSkills, type SkillSummary } from '@/api/skills';
 import { createSession } from '@/api/chat';
 import { ApiError } from '@/api/client';
-import { tr as trInline, useI18n } from '@/i18n/locale';
+
+const AGENT_PROFILE: Record<string, { label: string; role: string; domain: string; risk: string }> = {
+  default: {
+    label: 'Coordinator 协调员',
+    role: '统一入口，负责理解问题、选择工具、必要时派发 specialist 子 Agent。',
+    domain: '通用分析 / 编排派活',
+    risk: '按工具风险继承',
+  },
+  'incident-investigator': {
+    label: 'RCA 调查专家',
+    role: '围绕单个事件做指标、日志、Trace、Edge 上下文关联，输出根因、证据和建议动作。',
+    domain: '事件 / 告警 / RCA',
+    risk: '只读优先',
+  },
+  'specialist-sre': {
+    label: 'SRE 专家',
+    role: '判断系统健康度、告警优先级、SLO/趋势异常和影响范围。',
+    domain: '可用性 / 稳定性',
+    risk: '只读优先',
+  },
+  'specialist-ops': {
+    label: '运维专家',
+    role: '分析服务状态、进程、计划任务、配置和处置建议；涉及变更时进入二审。',
+    domain: '主机运维 / 服务处置',
+    risk: '变更需确认',
+  },
+  'specialist-compute': {
+    label: '计算资源专家',
+    role: '定位 CPU、内存、load、OOM、调度等计算资源问题。',
+    domain: 'CPU / 内存 / 进程',
+    risk: '只读优先',
+  },
+  'specialist-network': {
+    label: '网络专家',
+    role: '排查 DNS、路由、iptables、conntrack、TLS、MTU、OVS 等网络问题。',
+    domain: '网络 / 连通性',
+    risk: '只读优先',
+  },
+  'specialist-disk': {
+    label: '磁盘专家',
+    role: '排查磁盘空间、inode、I/O、文件系统异常和大文件风险。',
+    domain: '磁盘 / 文件系统',
+    risk: '只读优先',
+  },
+  'specialist-container': {
+    label: '容器运维专家',
+    role: '排查 Docker 容器状态、日志、健康检查、资源占用、网络、挂载、镜像和 Compose 服务异常。',
+    domain: 'Docker / 容器 / Compose',
+    risk: '只读优先',
+  },
+  reviewer: {
+    label: 'Reviewer 审核员',
+    role: '对重启、变更、删除等高风险动作做二审，给出批准/拒绝建议和风险说明。',
+    domain: '高风险动作治理',
+    risk: '人工确认',
+  },
+  reporter: {
+    label: '报告撰写专家',
+    role: '把事件、巡检和运维事实整理成 RCA、巡检或周/月报材料。',
+    domain: '报告 / 复盘',
+    risk: '只读',
+  },
+};
+
+const BUILTIN_ORDER = [
+  'default',
+  'incident-investigator',
+  'specialist-sre',
+  'specialist-ops',
+  'specialist-compute',
+  'specialist-network',
+  'specialist-disk',
+  'specialist-container',
+  'reviewer',
+  'reporter',
+];
 
 export default function AgentsPage() {
-  const { tr } = useI18n();
   const [items, setItems] = useState<AgentSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  // editing.seed 预填一份「基于内置助理新建」的草稿（fork），对齐知识库
-  // 「复制为组织文档」：内置 / 预置助理只读，想改就 fork 成自定义助理。
   const [editing, setEditing] = useState<
     | { mode: 'create'; seed?: AgentSummary }
     | { mode: 'edit'; agent: AgentSummary }
     | null
   >(null);
   const [deleting, setDeleting] = useState<AgentSummary | null>(null);
-  // 详情查看弹窗：点击卡片主体打开（参照知识库文档 / 技能详情）。
   const [viewing, setViewing] = useState<AgentSummary | null>(null);
 
   const fetchAgents = useCallback(async (silent = false) => {
@@ -71,7 +124,7 @@ export default function AgentsPage() {
     else setLoading(true);
     try {
       const r = await listAgents();
-      setItems((r.items ?? []).map(localizedAgent));
+      setItems(r.items ?? []);
       setErr(null);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : (e as Error).message);
@@ -82,61 +135,54 @@ export default function AgentsPage() {
   }, []);
 
   useEffect(() => {
-    fetchAgents();
+    void fetchAgents();
   }, [fetchAgents]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const matched = !q
       ? items
-      : items.filter(
-          (a) =>
+      : items.filter((a) => {
+          const p = profileOf(a);
+          return (
             a.name.toLowerCase().includes(q) ||
-            (a.description ?? '').toLowerCase().includes(q) ||
-            (a.when_to_use ?? '').toLowerCase().includes(q),
-        );
-    // Built-ins in the curated order (default → specialists → reviewer),
-    // then everything else alphabetically. Done client-side so the page
-    // doesn't depend on the registry's iteration order.
-    return [...matched].sort((a, b) => {
-      const ra = builtinRank(a.name);
-      const rb = builtinRank(b.name);
-      if (ra !== rb) return ra - rb;
-      return a.name.localeCompare(b.name);
-    });
+            p.label.toLowerCase().includes(q) ||
+            p.role.toLowerCase().includes(q) ||
+            p.domain.toLowerCase().includes(q) ||
+            (a.description ?? '').toLowerCase().includes(q)
+          );
+        });
+    return [...matched].sort((a, b) => builtinRank(a.name) - builtinRank(b.name) || a.name.localeCompare(b.name));
   }, [items, query]);
 
   return (
     <main className="anim-fade flex flex-1 flex-col overflow-hidden">
       <PageHeader
-        title={tr('助理', 'Assistants')}
-        subtitle={tr(`AI 助理库 · 共 ${items.length} 个，已匹配 ${filtered.length}`, `AI assistant library · ${items.length} total, ${filtered.length} matched`)}
+        title="Agent 助理 / 专家"
+        subtitle={`用于事件调查、资源诊断、人工二审和报告复盘的 AI 专家库，共 ${items.length} 个`}
         actions={
           <>
-            <Button
-              onClick={() => fetchAgents(true)}
-              disabled={loading || refreshing}
-              variant="ghost"
-            >
+            <Button onClick={() => fetchAgents(true)} disabled={loading || refreshing} variant="ghost">
               <RefreshCw size={12} className={cn(refreshing && 'animate-spin')} />
-              {tr('刷新', 'Refresh')}
+              刷新
             </Button>
             <Button onClick={() => setEditing({ mode: 'create' })} variant="primary">
-              <Plus size={12} /> {tr('新建助理', 'New assistant')}
+              <Plus size={12} />
+              新建 Agent
             </Button>
           </>
         }
       />
 
       <div className="border-b border-zinc-800/60 px-6 py-2.5">
-        <label className="relative block w-72">
-          <span className="sr-only">{tr('搜索', 'Search')}</span>
+        <label className="relative block w-80">
+          <span className="sr-only">搜索</span>
           <Search size={12} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500" />
           <input
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={tr('搜索 name / description', 'Search name / description')}
+            placeholder="搜索 Agent 名称 / 定位 / 领域"
             className="w-full rounded-md border border-zinc-800/60 bg-zinc-950/40 py-1.5 pl-8 pr-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
           />
         </label>
@@ -145,15 +191,27 @@ export default function AgentsPage() {
       <div className="flex-1 overflow-y-auto px-6 py-6">
         {err && (
           <div className="mb-4 rounded-lg border border-red-500/40 bg-red-500/5 px-4 py-3 text-sm text-red-300">
-            {tr('加载失败：', 'Load failed: ')}{err}
+            加载失败：{err}
           </div>
         )}
         {loading ? (
-          <div className="flex h-40 items-center justify-center text-sm text-zinc-500">{tr('加载中…', 'Loading…')}</div>
+          <div className="flex h-40 items-center justify-center text-sm text-zinc-500">加载中...</div>
         ) : filtered.length === 0 ? (
-          <AgentsEmpty hasItems={items.length > 0} onCreate={() => setEditing({ mode: 'create' })} />
+          <EmptyState
+            icon={Users}
+            title={items.length > 0 ? '没有匹配的 Agent' : '还没有 Agent 注册'}
+            hint={items.length > 0 ? '换个关键字再试。' : '内置 Agent 会在服务启动时加载，也可以创建自定义 Agent。'}
+            action={
+              items.length === 0 ? (
+                <Button variant="primary" onClick={() => setEditing({ mode: 'create' })}>
+                  <Plus size={12} />
+                  新建 Agent
+                </Button>
+              ) : undefined
+            }
+          />
         ) : (
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {filtered.map((a) => (
               <AgentCard
                 key={a.name}
@@ -209,60 +267,6 @@ export default function AgentsPage() {
   );
 }
 
-// SHORT_LABELS — short Chinese display name per built-in persona id.
-// Mirrors web/src/components/AgentBadge.tsx so card titles + sidebar
-// chips stay aligned. Add new entries when shipping new personas.
-const SHORT_LABELS_ZH: Record<string, string> = {
-  default: '默认助理',
-  'incident-investigator': '故障诊断',
-  'specialist-sre': 'SRE 专家',
-  'specialist-ops': '运维专家',
-  'specialist-compute': '计算专家',
-  'specialist-network': '网络专家',
-  'specialist-disk': '磁盘专家',
-  reviewer: '审核员',
-};
-
-const SHORT_LABELS_EN: Record<string, string> = {
-  default: 'Default',
-  'incident-investigator': 'Incident investigator',
-  'specialist-sre': 'SRE specialist',
-  'specialist-ops': 'Ops specialist',
-  'specialist-compute': 'Compute specialist',
-  'specialist-network': 'Network specialist',
-  'specialist-disk': 'Disk specialist',
-  reviewer: 'Reviewer',
-};
-
-// BUILTIN_ORDER drives the display order on /agents. The three
-// resource-domain specialists (compute / network / disk) cluster
-// together after the SRE / Ops "what's the situation" pair, so a
-// scroll-pass reads like a triage rail: triage → ops decision →
-// resource drilldown → SOP guard.
-const BUILTIN_ORDER: string[] = [
-  'default',
-  'incident-investigator',
-  'specialist-sre',
-  'specialist-ops',
-  'specialist-compute',
-  'specialist-network',
-  'specialist-disk',
-  'reviewer',
-];
-
-function builtinRank(name: string): number {
-  const idx = BUILTIN_ORDER.indexOf(name);
-  return idx === -1 ? BUILTIN_ORDER.length : idx;
-}
-
-const SHORT_LABELS = new Proxy({} as Record<string, string>, {
-  get: (_t, key: string) => {
-    const zh = SHORT_LABELS_ZH[key];
-    if (zh == null) return undefined;
-    return trInline(zh, SHORT_LABELS_EN[key] ?? zh);
-  },
-});
-
 function AgentCard({
   agent,
   onView,
@@ -274,49 +278,38 @@ function AgentCard({
   onEdit: () => void;
   onDelete: () => void;
 }) {
-  const { tr } = useI18n();
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const p = profileOf(agent);
   const toolCount = agent.tools?.length ?? 0;
   const isUser = agent.source === 'user';
   const canDelete = agent.source !== 'builtin' && agent.name !== 'default';
-  // Short Chinese display name. Mirrors AgentBadge's mapping; falls
-  // back to the ascii name for unknown personas (e.g. user-created).
-  // Description was used as the title before but it's a full sentence
-  // and made cards look noisy — we now show a short label and let the
-  // description live in the card body as a 2-line teaser.
-  const displayName = SHORT_LABELS[agent.name] ?? agent.name;
 
   const onUse = useCallback(async () => {
     if (busy) return;
     setBusy(true);
     setErr(null);
     try {
-      const title = tr(`使用 ${agent.name} - 新会话`, `Using ${agent.name} - new session`).slice(0, 60);
-      const session = await createSession({ title, agent_id: agent.name });
+      const session = await createSession({ title: `使用 ${p.label}`, agent_id: agent.name });
       navigate(`/chat/${session.id}`);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : (e as Error).message);
       setBusy(false);
     }
-  }, [agent.name, busy, navigate, tr]);
+  }, [agent.name, busy, navigate, p.label]);
 
   return (
-    <Card className="flex cursor-pointer flex-col transition-colors hover:bg-zinc-800/40" onClick={onView}>
+    <Card interactive className="flex cursor-pointer flex-col" onClick={onView}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex items-center gap-2">
-          <span className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-indigo-500/20 text-indigo-300 ring-1 ring-inset ring-indigo-500/40">
-            <Bot size={14} />
+          <span className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-indigo-500/20 text-indigo-300 ring-1 ring-inset ring-indigo-500/40">
+            {agent.name.includes('disk') ? <HardDrive size={15} /> : agent.name === 'reviewer' ? <ShieldCheck size={15} /> : <Bot size={15} />}
           </span>
           <div className="min-w-0">
-            <div className="truncate text-sm font-medium text-zinc-100" title={agent.name}>
-              {displayName}
-            </div>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-zinc-500">
-              <span className="font-mono normal-case tracking-normal text-zinc-600">
-                {agent.name}
-              </span>
+            <div className="truncate text-sm font-medium text-zinc-100" title={agent.name}>{p.label}</div>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-zinc-500">
+              <span className="font-mono text-zinc-600">{agent.name}</span>
               <span>·</span>
               <SourceLabel source={agent.source} />
             </div>
@@ -324,80 +317,40 @@ function AgentCard({
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {isUser && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onEdit();
-              }}
-              title={tr('编辑', 'Edit')}
-              className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-            >
+            <SmallIcon title="编辑" onClick={onEdit}>
               <Pencil size={11} />
-            </button>
+            </SmallIcon>
           )}
           {canDelete && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete();
-              }}
-              title={isUser ? tr('删除', 'Delete') : tr('从助理列表中移除（重启后内置 persona 会自动加载回来）', 'Remove from the list (built-in personas reload automatically on restart)')}
-              className="rounded p-1 text-zinc-500 hover:bg-red-900/30 hover:text-red-300"
-            >
+            <SmallIcon title="删除" onClick={onDelete} danger>
               <Trash2 size={11} />
-            </button>
+            </SmallIcon>
           )}
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              void onUse();
-            }}
-            disabled={busy}
-            title={tr('用此助理开新会话', 'Start a new session with this assistant')}
-            className="ml-1 inline-flex items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/10 px-2 py-1 text-[11px] text-indigo-200 hover:bg-indigo-500/20 disabled:opacity-50"
-          >
-            <MessageSquarePlus size={11} />
-            {busy ? tr('创建中…', 'Creating…') : tr('使用此助理', 'Use this')}
-          </button>
         </div>
       </div>
       {err && <div className="mt-2 text-[11px] text-red-300">{err}</div>}
-      {agent.description && (
-        <p className="mt-3 line-clamp-2 text-xs leading-relaxed text-zinc-400">
-          {agent.description}
-        </p>
-      )}
-      <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-500">
-        <span>{toolCount > 0 ? tr(`${toolCount} 个工具`, `${toolCount} tool(s)`) : tr('继承全部工具', 'Inherits all tools')}</span>
-        {agent.permission_mode === 'read-only' && (
-          <>
-            <span className="text-zinc-700">·</span>
-            <span className="text-emerald-400">{tr('只读', 'Read-only')}</span>
-          </>
-        )}
+      <p className="mt-3 line-clamp-2 text-xs leading-relaxed text-zinc-400">{p.role}</p>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <Tag>{p.domain}</Tag>
+        <Tag tone={p.risk === '人工确认' || p.risk === '变更需确认' ? 'warn' : 'ok'}>{p.risk}</Tag>
+        <Tag>{toolCount > 0 ? `${toolCount} 个工具` : '继承工具'}</Tag>
       </div>
+      <Button
+        variant="ghost"
+        disabled={busy}
+        className="mt-4 justify-center"
+        onClick={(e) => {
+          e.stopPropagation();
+          void onUse();
+        }}
+      >
+        <MessageSquarePlus size={12} />
+        {busy ? '创建中...' : '使用此 Agent'}
+      </Button>
     </Card>
   );
 }
 
-function SourceLabel({ source }: { source?: AgentSource }) {
-  const { tr } = useI18n();
-  if (source === 'user') return <span className="text-violet-300">{tr('自定义', 'Custom')}</span>;
-  if (source === 'builtin') return <span className="text-emerald-300">{tr('系统内置', 'Built-in')}</span>;
-  if (source === 'disk') return <span>{tr('预置', 'Preset')}</span>;
-  return <span>{tr('预置', 'Preset')}</span>;
-}
-
-
-// AgentDetailModal — 只读详情查看，参照知识库文档的阅读弹窗：完整展示
-// description / when_to_use / system prompt（原文）/ 工具清单 / 模型等。
-// 编辑路径按 source 区分（对齐知识库 vault 文档「只读 + 复制为组织文档」）：
-//   - user 自定义助理 → 「编辑」直接改 user_agents 行
-//   - builtin / disk 内置 / 预置 → 定义在代码 / agents/*.md，不可在线改，
-//     提供「复制为自定义助理」fork 出一份可编辑的草稿
 function AgentDetailModal({
   agent,
   onClose,
@@ -409,27 +362,24 @@ function AgentDetailModal({
   onEdit: () => void;
   onFork: () => void;
 }) {
-  const { tr } = useI18n();
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const displayName = SHORT_LABELS[agent.name] ?? agent.name;
+  const p = profileOf(agent);
   const isUser = agent.source === 'user';
-  const toolCount = agent.tools?.length ?? 0;
 
   const onUse = useCallback(async () => {
     if (busy) return;
     setBusy(true);
     setErr(null);
     try {
-      const title = tr(`使用 ${agent.name} - 新会话`, `Using ${agent.name} - new session`).slice(0, 60);
-      const session = await createSession({ title, agent_id: agent.name });
+      const session = await createSession({ title: `使用 ${p.label}`, agent_id: agent.name });
       navigate(`/chat/${session.id}`);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : (e as Error).message);
       setBusy(false);
     }
-  }, [agent.name, busy, navigate, tr]);
+  }, [agent.name, busy, navigate, p.label]);
 
   return (
     <Modal
@@ -437,154 +387,75 @@ function AgentDetailModal({
       onClose={onClose}
       size="lg"
       resizable
-      title={displayName}
+      title={p.label}
       footer={
         <>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
-          >
-            {tr('关闭', 'Close')}
-          </button>
+          <Button variant="ghost" onClick={onClose}>关闭</Button>
           {isUser ? (
-            <button
-              type="button"
-              onClick={onEdit}
-              className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
-            >
-              <Pencil size={11} /> {tr('编辑', 'Edit')}
-            </button>
+            <Button variant="ghost" onClick={onEdit}><Pencil size={11} />编辑</Button>
           ) : (
-            <button
-              type="button"
-              onClick={onFork}
-              title={tr('内置 / 预置助理定义在代码 / agents/*.md，不可直接改；复制一份为自定义助理后即可编辑', 'Built-in / preset assistants are defined in code / agents/*.md and cannot be edited directly; copy into a custom assistant to edit')}
-              className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
-            >
-              <Copy size={11} /> {tr('复制为自定义助理', 'Copy as custom')}
-            </button>
+            <Button variant="ghost" onClick={onFork}><Copy size={11} />复制为自定义 Agent</Button>
           )}
-          <button
-            type="button"
-            onClick={() => void onUse()}
-            disabled={busy}
-            className="inline-flex items-center gap-1.5 rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
-          >
-            <MessageSquarePlus size={11} /> {busy ? tr('创建中…', 'Creating…') : tr('使用此助理', 'Use this')}
-          </button>
+          <Button variant="subtle" onClick={() => void onUse()} disabled={busy}>
+            <MessageSquarePlus size={11} />
+            {busy ? '创建中...' : '使用此 Agent'}
+          </Button>
         </>
       }
     >
       <div className="space-y-4">
+        {err && <div className="text-[11px] text-red-300">{err}</div>}
         <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
           <span className="font-mono text-zinc-400">{agent.name}</span>
           <span>·</span>
           <SourceLabel source={agent.source} />
-          {agent.permission_mode === 'read-only' && (
-            <>
-              <span className="text-zinc-700">·</span>
-              <span className="text-emerald-400">{tr('只读', 'Read-only')}</span>
-            </>
-          )}
-          <span className="ml-auto">
-            {toolCount > 0 ? tr(`${toolCount} 个工具`, `${toolCount} tool(s)`) : tr('继承全部工具', 'Inherits all tools')}
-          </span>
+          <Tag>{p.domain}</Tag>
+          <Tag tone={p.risk === '人工确认' || p.risk === '变更需确认' ? 'warn' : 'ok'}>{p.risk}</Tag>
+          <span className="ml-auto">{agent.tools?.length ? `${agent.tools.length} 个工具` : '继承全部工具'}</span>
         </div>
 
-        {err && <div className="text-[11px] text-red-300">{err}</div>}
+        <DetailSection label="产品定位">
+          <p className="text-xs leading-relaxed text-zinc-300">{p.role}</p>
+        </DetailSection>
 
-        <DetailSection label={tr('描述', 'Description')}>
-          <p className="text-xs leading-relaxed text-zinc-300">{agent.description || '—'}</p>
+        <DetailSection label="原始描述">
+          <p className="whitespace-pre-wrap text-xs leading-relaxed text-zinc-300">{agent.description || '未填写'}</p>
         </DetailSection>
 
         {agent.when_to_use && (
-          <DetailSection label={tr('何时使用', 'When to use')}>
+          <DetailSection label="何时使用">
             <p className="whitespace-pre-wrap text-xs leading-relaxed text-zinc-300">{agent.when_to_use}</p>
           </DetailSection>
         )}
 
-        <DetailSection label={tr('系统提示（原文）', 'System prompt (raw)')}>
+        <DetailSection label="系统提示词">
           {agent.system_prompt ? (
             <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-zinc-800 bg-zinc-950/40 p-3 font-mono text-[11px] leading-relaxed text-zinc-300">
               {agent.system_prompt}
             </pre>
           ) : (
-            <p className="text-xs text-zinc-500">{tr('继承 coordinator 默认提示', 'Inherits the coordinator default prompt')}</p>
+            <p className="text-xs text-zinc-500">继承 coordinator 默认提示词</p>
           )}
         </DetailSection>
 
-        {agent.critical_reminder && (
-          <DetailSection label={tr('关键提醒', 'Critical reminder')}>
-            {/* 用不带透明度的 text-amber-300：light 主题有 amber-300→amber-700
-                的覆盖（index.css），透明度变体 /80 不在覆盖内、浅色下会发灰看不清。
-                配一层 amber 描边底色，强化「提醒」语义又保证两主题都够对比度。 */}
-            <p className="whitespace-pre-wrap rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-300">
-              {agent.critical_reminder}
-            </p>
-          </DetailSection>
-        )}
-
-        <DetailSection label={tr('允许使用的工具', 'Allowed tools')}>
-          {toolCount === 0 ? (
-            <p className="text-xs text-zinc-500">{tr('继承 coordinator 的全部工具', 'Inherits all coordinator tools')}</p>
-          ) : (
+        <DetailSection label="允许使用的工具">
+          {agent.tools?.length ? (
             <div className="flex flex-wrap gap-1.5">
-              {agent.tools!.map((t) => (
+              {agent.tools.map((t) => (
                 <span key={t} className="rounded border border-zinc-800 bg-zinc-950/40 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">
                   {t}
                 </span>
               ))}
             </div>
+          ) : (
+            <p className="text-xs text-zinc-500">继承 coordinator 的全部工具</p>
           )}
         </DetailSection>
-
-        {(agent.model || (agent.max_turns ?? 0) > 0) && (
-          <div className="flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-zinc-500">
-            {agent.model && (
-              <span>{tr('模型', 'Model')}: <span className="font-mono text-zinc-300">{agent.model}</span></span>
-            )}
-            {(agent.max_turns ?? 0) > 0 && (
-              <span>{tr('最大轮数', 'Max turns')}: <span className="text-zinc-300">{agent.max_turns}</span></span>
-            )}
-          </div>
-        )}
       </div>
     </Modal>
   );
 }
 
-function DetailSection({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <section>
-      <div className="mb-1.5 text-[11px] uppercase tracking-wider text-zinc-500">{label}</div>
-      {children}
-    </section>
-  );
-}
-
-function AgentsEmpty({ hasItems, onCreate }: { hasItems: boolean; onCreate: () => void }) {
-  const { tr } = useI18n();
-  return (
-    <EmptyState
-      icon={Users}
-      title={hasItems ? tr('没有匹配的助理', 'No matching assistants') : tr('还没有助理注册', 'No assistants registered yet')}
-      action={
-        !hasItems && (
-          <Button variant="primary" onClick={onCreate}>
-            <Plus size={12} /> {tr('新建助理', 'New assistant')}
-          </Button>
-        )
-      }
-    />
-  );
-}
-
-// AgentEditor is the create + edit form modal. Reused by three flows:
-//   - create blank: existing=null, seed=undefined
-//   - create from fork: existing=null, seed=<内置/预置助理> — 预填正文，
-//     name 留空让用户取新名（对齐知识库「复制为组织文档」）
-//   - edit: existing=<user agent> — Name 字段只读（name 是不可变标识）
 function AgentEditor({
   mode,
   existing,
@@ -598,9 +469,6 @@ function AgentEditor({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const { tr } = useI18n();
-  // base 是预填来源：edit 用 existing，fork 新建用 seed。name 只在 edit
-  // 时承袭；fork 留空（不能与被 fork 的内置助理重名）。
   const base = existing ?? seed ?? null;
   const [name, setName] = useState(existing?.name ?? '');
   const [description, setDescription] = useState(base?.description ?? '');
@@ -630,11 +498,8 @@ function AgentEditor({
         model: model.trim() || undefined,
         max_turns: maxTurns > 0 ? maxTurns : undefined,
       };
-      if (mode === 'create') {
-        await createUserAgent(input);
-      } else {
-        await updateUserAgent(existing!.name, input);
-      }
+      if (mode === 'create') await createUserAgent(input);
+      else await updateUserAgent(existing!.name, input);
       onSaved();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : (e as Error).message);
@@ -644,149 +509,85 @@ function AgentEditor({
   };
 
   const toggleTool = (key: string) => {
-    setAllowedTools((cur) =>
-      cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key],
-    );
+    setAllowedTools((cur) => cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key]);
   };
 
   return (
     <Modal
       open
       onClose={onClose}
-      title={
-        mode === 'edit'
-          ? tr(`编辑 ${existing?.name}`, `Edit ${existing?.name}`)
-          : seed
-            ? tr(`基于 ${seed.name} 新建助理`, `New assistant from ${seed.name}`)
-            : tr('新建助理', 'New assistant')
-      }
+      title={mode === 'edit' ? `编辑 ${existing?.name}` : seed ? `基于 ${seed.name} 新建 Agent` : '新建 Agent'}
       footer={
         <>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
-          >
-            {tr('取消', 'Cancel')}
-          </button>
-          <button
-            type="button"
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button
+            variant="subtle"
             onClick={() => void submit()}
-            disabled={
-              submitting ||
-              (mode === 'create' && name.trim() === '') ||
-              description.trim() === '' ||
-              systemPrompt.trim() === ''
-            }
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+            disabled={submitting || (mode === 'create' && name.trim() === '') || description.trim() === '' || systemPrompt.trim() === ''}
           >
-            {submitting ? tr('保存中…', 'Saving…') : tr('保存', 'Save')}
-          </button>
+            {submitting ? '保存中...' : '保存'}
+          </Button>
         </>
       }
     >
       <div className="space-y-4 text-xs text-zinc-300">
-        {err && (
-          <div className="rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-red-300">
-            {err}
-          </div>
-        )}
-
-        <Field label={tr('名称', 'Name')} required>
+        {err && <div className="rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-red-300">{err}</div>}
+        <Field label="名称" required>
           <input
-            type="text"
             value={name}
             disabled={mode === 'edit'}
             onChange={(e) => setName(e.target.value)}
-            placeholder={tr('lower_snake 或 kebab-case，例如 my_db_assistant', 'lower_snake or kebab-case, e.g. my_db_assistant')}
+            placeholder="lower_snake 或 kebab-case，例如 security_reviewer"
             className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-xs text-zinc-100 disabled:opacity-50 focus:border-zinc-600 focus:outline-none"
             maxLength={64}
           />
-          <div className="mt-1 text-[11px] text-zinc-500">
-            {tr('创建后不能改名。', 'Cannot rename after creation.')}
-          </div>
+          <div className="mt-1 text-[11px] text-zinc-500">创建后不能改名。</div>
         </Field>
-
-        <Field label={tr('描述', 'Description')} required>
+        <Field label="描述" required>
           <input
-            type="text"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder={tr('一句话说清这个助理擅长什么', 'One sentence on what this assistant is good at')}
+            placeholder="一句话说明这个 Agent 擅长什么"
             className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
             maxLength={512}
           />
         </Field>
-
-        <Field label={tr('何时使用', 'When to use')}>
+        <Field label="何时使用">
           <textarea
             value={whenToUse}
             onChange={(e) => setWhenToUse(e.target.value)}
-            placeholder={tr('给 coordinator 的判断线索：什么场景把任务派给这个助理', 'Hint for the coordinator: when to delegate to this assistant')}
+            placeholder="给 coordinator 的派活线索"
             className="h-20 w-full resize-y rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
           />
         </Field>
-
-        <Field label={tr('系统提示', 'System prompt')} required>
+        <Field label="系统提示词" required>
           <textarea
             value={systemPrompt}
             onChange={(e) => setSystemPrompt(e.target.value)}
-            placeholder={tr('你是 X 专家，遇到 Y 类问题先做 Z...', 'You are an X expert; when seeing a Y problem, first do Z...')}
+            placeholder="你是某类安全运维专家..."
             className="h-32 w-full resize-y rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
           />
         </Field>
-
-        <Field label={tr('允许使用的工具', 'Allowed tools')}>
-          <div className="text-[11px] text-zinc-500 mb-1">
-            {tr('留空 = 继承 coordinator 的全部工具', 'Empty = inherit all coordinator tools')}
-          </div>
-          {skills.length === 0 ? (
-            <div className="text-[11px] text-zinc-500">{tr('加载工具列表中…', 'Loading tool list…')}</div>
-          ) : (
-            <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-950/40 p-2">
-              <div className="grid grid-cols-2 gap-1">
-                {skills.map((s) => (
-                  <label
-                    key={s.key}
-                    className="flex items-center gap-1.5 rounded px-1.5 py-1 text-[11px] hover:bg-zinc-900/60"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={allowedTools.includes(s.key)}
-                      onChange={() => toggleTool(s.key)}
-                      className="h-3 w-3 accent-indigo-500"
-                    />
-                    <span className="font-mono">{s.key}</span>
-                  </label>
-                ))}
-              </div>
+        <Field label="允许使用的工具">
+          <div className="mb-1 text-[11px] text-zinc-500">留空表示继承 coordinator 的全部工具。</div>
+          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-950/40 p-2">
+            <div className="grid grid-cols-2 gap-1">
+              {skills.map((s) => (
+                <label key={s.key} className="flex items-center gap-1.5 rounded px-1.5 py-1 text-[11px] hover:bg-zinc-900/60">
+                  <input type="checkbox" checked={allowedTools.includes(s.key)} onChange={() => toggleTool(s.key)} className="h-3 w-3 accent-indigo-500" />
+                  <span className="truncate font-mono">{s.key}</span>
+                </label>
+              ))}
             </div>
-          )}
-          <div className="mt-1 text-[11px] text-zinc-500">
-            {tr(`已选 ${allowedTools.length} / ${skills.length}`, `Selected ${allowedTools.length} / ${skills.length}`)}
           </div>
+          <div className="mt-1 text-[11px] text-zinc-500">已选 {allowedTools.length} / {skills.length}</div>
         </Field>
-
         <div className="grid grid-cols-2 gap-3">
-          <Field label={tr('模型', 'Model')}>
-            <input
-              type="text"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder={tr('留空 = 继承', 'Empty = inherit')}
-              className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
-            />
+          <Field label="模型">
+            <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="留空表示继承" className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none" />
           </Field>
-          <Field label={tr('最大轮数', 'Max turns')}>
-            <input
-              type="number"
-              value={maxTurns || ''}
-              onChange={(e) => setMaxTurns(parseInt(e.target.value, 10) || 0)}
-              placeholder={tr('留空 = 继承', 'Empty = inherit')}
-              min={0}
-              max={100}
-              className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
-            />
+          <Field label="最大轮数">
+            <input type="number" value={maxTurns || ''} onChange={(e) => setMaxTurns(parseInt(e.target.value, 10) || 0)} placeholder="留空表示继承" min={0} max={100} className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none" />
           </Field>
         </div>
       </div>
@@ -794,39 +595,9 @@ function AgentEditor({
   );
 }
 
-function Field({
-  label,
-  required,
-  children,
-}: {
-  label: string;
-  required?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="block">
-      <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-zinc-400">
-        {label}
-        {required && <span className="ml-0.5 text-red-400">*</span>}
-      </div>
-      {children}
-    </label>
-  );
-}
-
-function DeleteAgentDialog({
-  agent,
-  onClose,
-  onDone,
-}: {
-  agent: AgentSummary;
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const { tr } = useI18n();
+function DeleteAgentDialog({ agent, onClose, onDone }: { agent: AgentSummary; onClose: () => void; onDone: () => void }) {
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-
   const submit = async () => {
     setSubmitting(true);
     setErr(null);
@@ -839,48 +610,97 @@ function DeleteAgentDialog({
       setSubmitting(false);
     }
   };
-
   return (
     <Modal
       open
       onClose={onClose}
-      title={tr(`删除助理 ${agent.name}`, `Delete assistant ${agent.name}`)}
+      title={`删除 Agent ${agent.name}`}
       footer={
         <>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
-          >
-            {tr('取消', 'Cancel')}
-          </button>
-          <button
-            type="button"
-            onClick={() => void submit()}
-            disabled={submitting}
-            className="rounded-md bg-red-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-600 disabled:opacity-50"
-          >
-            {submitting ? tr('删除中…', 'Deleting…') : tr('删除', 'Delete')}
-          </button>
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button variant="danger" onClick={() => void submit()} disabled={submitting}>{submitting ? '删除中...' : '删除'}</Button>
         </>
       }
     >
       <div className="text-xs text-zinc-300">
-        {err && (
-          <div className="mb-3 rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-red-300">
-            {err}
-          </div>
-        )}
-        <p>
-          {tr('确定删除自定义助理 ', 'Delete custom assistant ')}<span className="font-mono text-zinc-100">{agent.name}</span>?
-        </p>
-        <p className="mt-2 text-zinc-500">
-          {tr(
-            '已经用此助理建过的会话不会被删除——它们会回退到默认 coordinator 继续运行。',
-            "Sessions already created with this assistant are kept — they fall back to the default coordinator.",
-          )}
-        </p>
+        {err && <div className="mb-3 rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-red-300">{err}</div>}
+        <p>确定删除 <span className="font-mono text-zinc-100">{agent.name}</span>？已创建的历史会话不会删除。</p>
       </div>
     </Modal>
   );
+}
+
+function SourceLabel({ source }: { source?: AgentSource }) {
+  if (source === 'user') return <span className="text-violet-300">自定义</span>;
+  if (source === 'builtin') return <span className="text-emerald-300">系统内置</span>;
+  if (source === 'disk') return <span>预置文件</span>;
+  return <span>预置</span>;
+}
+
+function Field({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-zinc-400">
+        {label}
+        {required && <span className="ml-0.5 text-red-400">*</span>}
+      </div>
+      {children}
+    </label>
+  );
+}
+
+function DetailSection({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <section>
+      <div className="mb-1.5 text-[11px] uppercase tracking-wider text-zinc-500">{label}</div>
+      {children}
+    </section>
+  );
+}
+
+function SmallIcon({ title, danger, onClick, children }: { title: string; danger?: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className={cn('rounded p-1 text-zinc-500 hover:bg-zinc-800', danger ? 'hover:text-red-300' : 'hover:text-zinc-200')}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Tag({ children, tone = 'plain' }: { children: React.ReactNode; tone?: 'plain' | 'ok' | 'warn' }) {
+  return (
+    <span
+      className={cn(
+        'rounded-md px-1.5 py-0.5 text-[10px] ring-1 ring-inset',
+        tone === 'ok'
+          ? 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/30'
+          : tone === 'warn'
+            ? 'bg-amber-500/10 text-amber-300 ring-amber-500/30'
+            : 'bg-zinc-800 text-zinc-300 ring-zinc-700',
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+function profileOf(agent: AgentSummary) {
+  return AGENT_PROFILE[agent.name] ?? {
+    label: agent.name,
+    role: agent.description || '自定义 Agent，可按组织场景限制工具、模型和系统提示词。',
+    domain: agent.source === 'user' ? '自定义场景' : '扩展 Agent',
+    risk: agent.permission_mode === 'read-only' ? '只读' : '按工具风险继承',
+  };
+}
+
+function builtinRank(name: string): number {
+  const idx = BUILTIN_ORDER.indexOf(name);
+  return idx === -1 ? BUILTIN_ORDER.length : idx;
 }

@@ -2,6 +2,27 @@ import { request } from './client';
 
 export type EdgeStatus = 'online' | 'offline' | 'unknown';
 
+export type AssetProfile = {
+  asset_type?: string;
+  collection_mode?: string;
+  external_source?: string;
+  external_ref?: string;
+  metric_datasource_id?: number | null;
+  metric_matcher?: string;
+  log_datasource_id?: number | null;
+  log_matcher?: string;
+  business_system?: string;
+  environment?: string;
+  region?: string;
+  datacenter?: string;
+  cloud_provider?: string;
+  owner?: string;
+  criticality?: string;
+  security_level?: string;
+  maintenance_window?: string;
+  tags?: string[];
+};
+
 // EdgeRole drives the sidebar 设备 sub-menu and AI prompt routing.
 // Backend stores a bit field; the wire shape is an array of these names.
 // One device can carry multiple roles (e.g. a hyper-converged box that's
@@ -46,6 +67,7 @@ export type Edge = {
   // its most recent register_edge handshake. Empty string means the agent
   // declined to report (e.g. pre-introduction binary).
   agent_version?: string;
+  asset_profile?: AssetProfile;
 };
 
 export type UpgradeAgentResponse = {
@@ -205,6 +227,28 @@ export function setEdgeRoles(deviceId: number | string, roles: EdgeRole[]) {
     `/devices/${encodeURIComponent(String(deviceId))}/roles`,
     { roles },
   );
+}
+
+export type EdgeSecurityPolicy = {
+  preset: 'docker-readonly';
+  enabled: boolean;
+  docker_available: boolean;
+  applied_at?: string;
+};
+
+export function getEdgeSecurityPolicy(id: number) {
+  return request<EdgeSecurityPolicy>('GET', `/edges/${id}/security-policy`);
+}
+
+export function applyEdgeSecurityPolicy(id: number, enabled: boolean) {
+  return request<EdgeSecurityPolicy>('PUT', `/edges/${id}/security-policy`, { enabled });
+}
+
+export function updateDeviceProfile(
+  deviceId: number | string,
+  profile: AssetProfile & { name?: string; description?: string },
+) {
+  return request<void>('PATCH', `/devices/${encodeURIComponent(String(deviceId))}`, profile);
 }
 
 export function getMetrics(

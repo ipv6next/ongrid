@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	devicebiz "github.com/ongridio/ongrid/internal/manager/biz/device"
 	edgebiz "github.com/ongridio/ongrid/internal/manager/biz/edge"
+	devicemodel "github.com/ongridio/ongrid/internal/manager/model/device"
 	edgemodel "github.com/ongridio/ongrid/internal/manager/model/edge"
 )
 
@@ -71,6 +73,52 @@ func TestGetEdgeSummaryTool_BatchHappy(t *testing.T) {
 		if edgeBlk["name"] == "" {
 			t.Errorf("entry %d edge.name empty", i)
 		}
+	}
+}
+
+func TestGetEdgeSummaryTool_IncludesAssetProfile(t *testing.T) {
+	now := time.Now()
+	deviceID := uint64(42)
+	edgeID := uint64(7)
+	edge := &edgemodel.Edge{ID: edgeID, Name: "pay-prod-01", Status: edgemodel.StatusOffline, LastSeenAt: &now, DeviceID: &deviceID}
+	edgeUC := edgebiz.NewUsecase(newFakeEdgeRepo(edge), nil, nil, slog.Default())
+	devRepo := newFakeDeviceRepoForTools(&devicemodel.Device{
+		ID:             deviceID,
+		Name:           "pay-prod-01",
+		Hostname:       "pay-prod-01",
+		Roles:          devicemodel.RoleBitServer,
+		BusinessSystem: "Payment",
+		Environment:    "生产",
+		Owner:          "secops",
+		Criticality:    "核心",
+		SecurityLevel:  "等保三级",
+		Tags:           "internet-facing",
+	})
+	linkRepo := &fakeEdgeDeviceRepoForTools{deviceToEdge: map[uint64]uint64{deviceID: edgeID}}
+	devUC := devicebiz.NewUsecase(devRepo, linkRepo, slog.Default())
+	tool := NewGetEdgeSummaryTool(nil, edgeUC, devUC, nil, nil)
+
+	out, err := tool.InvokableRun(context.Background(), `{"device_ids":[42]}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	var env EdgeSummaryBatchResponse
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(env.Results) != 1 || env.Results[0].Summary == nil {
+		t.Fatalf("unexpected response: %+v", env)
+	}
+	edgeBlock, ok := env.Results[0].Summary["edge"].(map[string]any)
+	if !ok {
+		t.Fatalf("edge block missing: %+v", env.Results[0].Summary)
+	}
+	profile, ok := edgeBlock["asset_profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("asset_profile missing: %+v", edgeBlock)
+	}
+	if profile["business_system"] != "Payment" || profile["criticality"] != "核心" {
+		t.Fatalf("asset_profile wrong: %+v", profile)
 	}
 }
 

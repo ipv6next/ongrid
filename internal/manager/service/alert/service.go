@@ -10,11 +10,15 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
 	bizalert "github.com/ongridio/ongrid/internal/manager/biz/alert"
+	bizdevice "github.com/ongridio/ongrid/internal/manager/biz/device"
 	model "github.com/ongridio/ongrid/internal/manager/model/alert"
+	devicemodel "github.com/ongridio/ongrid/internal/manager/model/device"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/notify"
 )
@@ -36,6 +40,7 @@ type Incident struct {
 	ID             uint64            `json:"id"`
 	RuleKey        string            `json:"rule_key"`
 	RuleName       string            `json:"rule_name"`
+	SourceType     string            `json:"source_type"`
 	Severity       string            `json:"severity"`
 	Status         string            `json:"status"`
 	Summary        string            `json:"summary"`
@@ -108,6 +113,47 @@ type ChannelTestResult struct {
 	Message  string `json:"message,omitempty"`
 }
 
+type AlertmanagerWebhook struct {
+	Receiver          string            `json:"receiver"`
+	Status            string            `json:"status"`
+	Alerts            []AlertmanagerOne `json:"alerts"`
+	GroupLabels       map[string]string `json:"groupLabels"`
+	CommonLabels      map[string]string `json:"commonLabels"`
+	CommonAnnotations map[string]string `json:"commonAnnotations"`
+	ExternalURL       string            `json:"externalURL"`
+	Version           string            `json:"version"`
+	GroupKey          string            `json:"groupKey"`
+}
+
+type AlertmanagerOne struct {
+	Status       string            `json:"status"`
+	Labels       map[string]string `json:"labels"`
+	Annotations  map[string]string `json:"annotations"`
+	StartsAt     time.Time         `json:"startsAt"`
+	EndsAt       time.Time         `json:"endsAt"`
+	GeneratorURL string            `json:"generatorURL"`
+	Fingerprint  string            `json:"fingerprint"`
+}
+
+type AlertmanagerIngestResult struct {
+	Accepted     int                      `json:"accepted"`
+	Created      int                      `json:"created"`
+	Reopened     int                      `json:"reopened"`
+	Resolved     int                      `json:"resolved"`
+	AssetMatched int                      `json:"asset_matched"`
+	PendingLink  int                      `json:"pending_link"`
+	Items        []AlertmanagerIngestItem `json:"items"`
+}
+
+type AlertmanagerIngestItem struct {
+	IncidentID       uint64 `json:"incident_id,omitempty"`
+	DedupeKey        string `json:"dedupe_key"`
+	Status           string `json:"status"`
+	RuleKey          string `json:"rule_key"`
+	AssetMatchStatus string `json:"asset_match_status"`
+	DeviceID         uint64 `json:"device_id,omitempty"`
+}
+
 // RuleCondition mirrors model.RuleCondition for transport.
 type RuleCondition struct {
 	Metric     string  `json:"metric"`
@@ -178,6 +224,11 @@ type Notifier interface {
 	Send(ctx context.Context, msg notify.Message, channels ...string) error
 }
 
+type AssetMatcher interface {
+	Get(ctx context.Context, id uint64) (*devicemodel.Device, error)
+	List(ctx context.Context, f bizdevice.ListFilter) ([]*devicemodel.Device, error)
+}
+
 // PreviewSample mirrors bizalert.PreviewSample for transport.
 type PreviewSample struct {
 	Timestamp time.Time         `json:"ts"`
@@ -210,6 +261,7 @@ type PreviewResult struct {
 type Service struct {
 	uc          *bizalert.Usecase
 	repo        bizalert.Repo
+	assets      AssetMatcher
 	notifier    Notifier
 	previewDeps bizalert.PreviewDeps
 	log         *slog.Logger
@@ -223,6 +275,10 @@ func New(uc *bizalert.Usecase, repo bizalert.Repo, notifier Notifier, log *slog.
 		log = slog.Default()
 	}
 	return &Service{uc: uc, repo: repo, notifier: notifier, log: log}
+}
+
+func (s *Service) SetAssetMatcher(m AssetMatcher) {
+	s.assets = m
 }
 
 // SetPreviewDeps wires the read-only preview clients (Prom range + Loki
@@ -270,6 +326,112 @@ func (s *Service) CountIncidents(ctx context.Context, _ Caller, in IncidentFilte
 		Status:   in.Status,
 		Severity: in.Severity,
 	})
+}
+
+func (s *Service) IngestAlertmanager(ctx context.Context, _ Caller, in AlertmanagerWebhook) (*AlertmanagerIngestResult, error) {
+	if s.uc == nil {
+		return nil, errs.ErrNotWiredYet
+	}
+	if len(in.Alerts) == 0 {
+		return nil, fmt.Errorf("%w: alerts required", errs.ErrInvalid)
+	}
+	out := &AlertmanagerIngestResult{Items: make([]AlertmanagerIngestItem, 0, len(in.Alerts))}
+	for _, a := range in.Alerts {
+		labels := mergeStringMaps(in.GroupLabels, in.CommonLabels, a.Labels)
+		annotations := mergeStringMaps(in.CommonAnnotations, a.Annotations)
+		status := strings.ToLower(strings.TrimSpace(firstNonEmpty(a.Status, in.Status, "firing")))
+		ruleKey := alertmanagerRuleKey(labels)
+		dedupeKey := alertmanagerDedupeKey(a, in, labels, ruleKey)
+		deviceID, matchedBy := s.matchAlertAsset(ctx, labels)
+		matchStatus := "pending"
+		if deviceID != nil {
+			matchStatus = "matched"
+		}
+		labels["source"] = "alertmanager"
+		labels["asset_match_status"] = matchStatus
+		if matchedBy != "" {
+			labels["asset_match_by"] = matchedBy
+		}
+		if in.Receiver != "" {
+			labels["alertmanager_receiver"] = in.Receiver
+		}
+		if in.GroupKey != "" {
+			labels["alertmanager_group_key"] = in.GroupKey
+		}
+		if in.ExternalURL != "" {
+			annotations["alertmanager_external_url"] = in.ExternalURL
+		}
+		if a.GeneratorURL != "" {
+			annotations["generator_url"] = a.GeneratorURL
+		}
+		if a.Fingerprint != "" {
+			labels["alertmanager_fingerprint"] = a.Fingerprint
+		}
+
+		item := AlertmanagerIngestItem{
+			DedupeKey:        dedupeKey,
+			Status:           status,
+			RuleKey:          ruleKey,
+			AssetMatchStatus: matchStatus,
+		}
+		if deviceID != nil {
+			item.DeviceID = *deviceID
+			out.AssetMatched++
+		} else {
+			out.PendingLink++
+		}
+
+		if status == "resolved" {
+			resolved, err := s.uc.SystemResolveIncident(ctx, dedupeKey, "external Alertmanager resolved", alertTime(a.EndsAt, a.StartsAt))
+			if err != nil {
+				return nil, err
+			}
+			if resolved {
+				out.Resolved++
+			}
+			item.Status = "resolved"
+			out.Items = append(out.Items, item)
+			out.Accepted++
+			continue
+		}
+
+		scopeType := model.RuleScopeGlobal
+		scope := firstNonEmpty(labels["instance"], labels["hostname"], labels["host"], "alertmanager")
+		if deviceID != nil {
+			scopeType = model.RuleScopeHost
+			scope = fmt.Sprintf("device:%d", *deviceID)
+		}
+		res, err := s.uc.RecordFiring(ctx, bizalert.FiringInput{
+			ScopeType:   scopeType,
+			Scope:       scope,
+			Rule:        ruleKey,
+			RuleName:    firstNonEmpty(labels["alertname"], ruleKey),
+			Severity:    normalizeExternalSeverity(labels["severity"]),
+			DeviceID:    deviceID,
+			OccurredAt:  alertTime(a.StartsAt, time.Time{}),
+			DedupeKey:   dedupeKey,
+			SourceType:  model.RuleSourceAlertmanager,
+			Title:       alertTitle(labels, annotations),
+			Summary:     firstNonEmpty(annotations["summary"], labels["alertname"], ruleKey),
+			Description: firstNonEmpty(annotations["description"], annotations["message"]),
+			Labels:      labels,
+			Annotations: annotations,
+			RunbookURL:  firstNonEmpty(annotations["runbook_url"], annotations["runbook"], a.GeneratorURL),
+		})
+		if err != nil {
+			return nil, err
+		}
+		item.IncidentID = res.Incident.ID
+		if res.IsNew {
+			out.Created++
+		}
+		if res.IsReopen {
+			out.Reopened++
+		}
+		out.Items = append(out.Items, item)
+		out.Accepted++
+	}
+	return out, nil
 }
 
 // GetIncident returns a single incident.
@@ -774,6 +936,7 @@ func toServiceIncident(r *model.Incident) *Incident {
 		ID:             r.ID,
 		RuleKey:        r.Rule,
 		RuleName:       r.RuleName,
+		SourceType:     r.SourceType,
 		Severity:       r.Severity,
 		Status:         r.Status,
 		Summary:        r.Summary,
@@ -810,6 +973,182 @@ func toServiceIncident(r *model.Incident) *Incident {
 		}
 	}
 	return out
+}
+
+func mergeStringMaps(parts ...map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, part := range parts {
+		for k, v := range part {
+			k = strings.TrimSpace(k)
+			if k == "" {
+				continue
+			}
+			out[k] = strings.TrimSpace(v)
+		}
+	}
+	return out
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func alertTime(primary, fallback time.Time) time.Time {
+	if !primary.IsZero() {
+		return primary
+	}
+	if !fallback.IsZero() {
+		return fallback
+	}
+	return time.Now().UTC()
+}
+
+func alertmanagerRuleKey(labels map[string]string) string {
+	raw := firstNonEmpty(labels["alertname"], labels["rule"], labels["alert"])
+	if raw == "" {
+		return "external_alert"
+	}
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range raw {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "external_alert"
+	}
+	return out
+}
+
+func alertmanagerDedupeKey(a AlertmanagerOne, wh AlertmanagerWebhook, labels map[string]string, ruleKey string) string {
+	if a.Fingerprint != "" {
+		return "alertmanager:" + a.Fingerprint
+	}
+	parts := []string{ruleKey}
+	for _, k := range []string{"device_id", "instance", "hostname", "host", "job", "severity"} {
+		if v := strings.TrimSpace(labels[k]); v != "" {
+			parts = append(parts, k+"="+v)
+		}
+	}
+	if wh.GroupKey != "" {
+		parts = append(parts, "group="+wh.GroupKey)
+	}
+	return "alertmanager:" + strings.Join(parts, ",")
+}
+
+func normalizeExternalSeverity(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "critical", "crit", "fatal", "page":
+		return "critical"
+	case "info", "informational", "notice":
+		return "info"
+	default:
+		return "warning"
+	}
+}
+
+func alertTitle(labels, annotations map[string]string) string {
+	summary := firstNonEmpty(annotations["summary"], annotations["message"])
+	alert := firstNonEmpty(labels["alertname"], "External alert")
+	target := firstNonEmpty(labels["instance"], labels["hostname"], labels["host"], labels["device"])
+	if summary != "" {
+		return summary
+	}
+	if target != "" {
+		return fmt.Sprintf("%s on %s", alert, target)
+	}
+	return alert
+}
+
+func (s *Service) matchAlertAsset(ctx context.Context, labels map[string]string) (*uint64, string) {
+	if s.assets == nil {
+		return nil, ""
+	}
+	if raw := firstNonEmpty(labels["device_id"], labels["ongrid_device_id"]); raw != "" {
+		if id, err := strconv.ParseUint(raw, 10, 64); err == nil && id > 0 {
+			if _, err := s.assets.Get(ctx, id); err == nil {
+				return &id, "device_id"
+			}
+		}
+	}
+	if raw := firstNonEmpty(labels["instance"], labels["address"], labels["target"]); raw != "" {
+		host := hostWithoutPort(raw)
+		if id := s.findAssetByExact(ctx, host); id != nil {
+			return id, "instance"
+		}
+	}
+	for _, k := range []string{"hostname", "host", "device", "nodename"} {
+		if raw := firstNonEmpty(labels[k]); raw != "" {
+			if id := s.findAssetByExact(ctx, raw); id != nil {
+				return id, k
+			}
+		}
+	}
+	return nil, ""
+}
+
+func (s *Service) findAssetByExact(ctx context.Context, value string) *uint64 {
+	value = strings.TrimSpace(value)
+	if value == "" || s.assets == nil {
+		return nil
+	}
+	candidates, err := s.assets.List(ctx, bizdevice.ListFilter{Name: value, Limit: 20})
+	if err != nil {
+		return nil
+	}
+	if len(candidates) == 0 {
+		candidates, _ = s.assets.List(ctx, bizdevice.ListFilter{Hostname: value, Limit: 20})
+	}
+	if len(candidates) == 0 && looksLikeIP(value) {
+		candidates, _ = s.assets.List(ctx, bizdevice.ListFilter{Limit: 1000})
+	}
+	needle := strings.ToLower(value)
+	for _, d := range candidates {
+		if d == nil {
+			continue
+		}
+		if strings.EqualFold(d.Name, needle) ||
+			strings.EqualFold(d.Hostname, needle) ||
+			strings.EqualFold(d.IPAddress, needle) ||
+			strings.EqualFold(d.ExternalRef, needle) {
+			id := d.ID
+			return &id
+		}
+	}
+	return nil
+}
+
+func hostWithoutPort(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	if i := strings.LastIndex(raw, ":"); i > -1 && strings.Count(raw, ":") == 1 {
+		return raw[:i]
+	}
+	return strings.Trim(raw, "[]")
+}
+
+func looksLikeIP(s string) bool {
+	return net.ParseIP(strings.TrimSpace(s)) != nil
 }
 
 // toServiceChannel converts a storage Channel row to the transport DTO.

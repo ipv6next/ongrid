@@ -14,10 +14,14 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	bizaudit "github.com/ongridio/ongrid/internal/manager/biz/audit"
 	svc "github.com/ongridio/ongrid/internal/manager/biz/skill"
+	auditmodel "github.com/ongridio/ongrid/internal/manager/model/audit"
+	auditmw "github.com/ongridio/ongrid/internal/manager/server/middleware"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
 )
@@ -98,6 +102,17 @@ func (h *Handler) execute(w http.ResponseWriter, r *http.Request) {
 	// edge_id requirement is scope-dependent — let the service layer
 	// decide. ScopeManager skills (web_search / subprocess packs) skip
 	// the check there; ScopeHost skills still 400 when edge_id == 0.
+	auditmw.SetAuditEvent(r, bizaudit.Event{
+		Action:       auditmodel.ActionSkillExecute,
+		ResourceType: auditmodel.ResourceSkill,
+		ResourceID:   key,
+		ResourceName: key,
+		Payload: map[string]any{
+			"skill_key": key,
+			"device_id": req.EdgeID,
+			"params":    auditParams(req.Params),
+		},
+	})
 	out, err := h.svc.Execute(r.Context(), caller, svc.ExecuteInput{
 		Key:    key,
 		EdgeID: req.EdgeID,
@@ -159,4 +174,57 @@ func errCode(err error) string {
 // case future routes (e.g. by-id) pick it up.
 func parseUint64(s string) (uint64, error) {
 	return strconv.ParseUint(s, 10, 64)
+}
+
+func auditParams(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return map[string]any{}
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return truncateForAudit(string(raw), 2048)
+	}
+	return scrubAuditValue(v)
+}
+
+func scrubAuditValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			if auditSensitiveKey(k) {
+				out[k] = "<redacted>"
+				continue
+			}
+			out[k] = scrubAuditValue(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = scrubAuditValue(val)
+		}
+		return out
+	case string:
+		return truncateForAudit(x, 2048)
+	default:
+		return x
+	}
+}
+
+func auditSensitiveKey(k string) bool {
+	low := strings.ToLower(k)
+	for _, marker := range []string{"password", "passwd", "secret", "token", "api_key", "apikey", "access_key", "private_key"} {
+		if strings.Contains(low, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateForAudit(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...<truncated>"
 }

@@ -10,6 +10,7 @@ import {
   Background,
   BackgroundVariant,
   Connection,
+  ConnectionMode,
   Controls,
   Edge,
   Handle,
@@ -120,7 +121,8 @@ function FlowCanvasNode({ data, selected }: NodeProps<CanvasNode>) {
   const isCondition = data.flowType === 'condition';
   const isTrigger = data.flowType.startsWith('trigger.');
   const ring = `${statusRing(data.runStatus)} ${selected ? 'ring-1 ring-indigo-500' : ''}`;
-  const handleBase = '!h-1.5 !w-1.5 !min-w-0 !border-0';
+  const handleBase =
+    '!h-3 !w-3 !min-w-0 !border-2 !border-zinc-900 !opacity-95 !z-20 cursor-crosshair transition-transform hover:!scale-125';
 
   // Condition node: a labelled two-way switch. Header row + two output
   // rows (真 / 假) each with its own color-matched source handle, so the
@@ -128,7 +130,7 @@ function FlowCanvasNode({ data, selected }: NodeProps<CanvasNode>) {
   if (isCondition) {
     return (
       <div className={`min-w-[120px] max-w-[220px] rounded-md border bg-zinc-900 text-left ${ring}`}>
-        <Handle type="target" position={Position.Left} className={`${handleBase} !bg-zinc-500`} style={{ top: 16 }} />
+        <Handle type="target" position={Position.Left} className={`${handleBase} !bg-zinc-500`} style={{ top: 16 }} title={tr('拖到这里连接上游节点', 'Drop here to connect upstream')} />
         <div className="flex items-center gap-1.5 px-2 py-1">
           <Icon size={12} className="shrink-0 text-amber-400" />
           <span className="truncate text-[11px] font-medium text-zinc-200">{data.label}</span>
@@ -136,26 +138,26 @@ function FlowCanvasNode({ data, selected }: NodeProps<CanvasNode>) {
         <div className="border-t border-zinc-800">
           <div className="relative flex items-center justify-end px-2 py-0.5 text-[9px] font-medium text-emerald-400">
             {tr('真', 'True')}
-            <Handle id="true" type="source" position={Position.Right} className={`${handleBase} !bg-emerald-500`} />
+            <Handle id="true" type="source" position={Position.Right} className={`${handleBase} !bg-emerald-500`} title={tr('从这里拖出 true 分支', 'Drag from here for the true branch')} />
           </div>
           <div className="relative flex items-center justify-end border-t border-zinc-800/60 px-2 py-0.5 text-[9px] font-medium text-zinc-500">
             {tr('假', 'False')}
-            <Handle id="false" type="source" position={Position.Right} className={`${handleBase} !bg-zinc-500`} />
+            <Handle id="false" type="source" position={Position.Right} className={`${handleBase} !bg-zinc-500`} title={tr('从这里拖出 false 分支', 'Drag from here for the false branch')} />
           </div>
         </div>
-        <Handle id="error" type="source" position={Position.Bottom} className={`${handleBase} !bg-red-500/80`} />
+        <Handle id="error" type="source" position={Position.Bottom} className={`${handleBase} !bg-red-500/80`} title={tr('从这里拖出错误分支', 'Drag from here for the error branch')} />
       </div>
     );
   }
 
   return (
     <div className={`flex min-w-[96px] max-w-[200px] items-center gap-1.5 rounded-md border bg-zinc-900 px-2 py-1 text-left transition-shadow ${ring}`}>
-      {!isTrigger && <Handle type="target" position={Position.Left} className={`${handleBase} !bg-zinc-500`} />}
+      {!isTrigger && <Handle type="target" position={Position.Left} className={`${handleBase} !bg-zinc-500`} title={tr('拖到这里连接上游节点', 'Drop here to connect upstream')} />}
       <Icon size={12} className={`shrink-0 ${meta?.color ?? 'text-zinc-400'}`} />
       <span className="truncate text-[11px] font-medium text-zinc-200">{data.label}</span>
-      <Handle id="next" type="source" position={Position.Right} className={`${handleBase} !bg-indigo-500`} />
+      <Handle id="next" type="source" position={Position.Right} className={`${handleBase} !bg-indigo-500`} title={tr('从这里拖到下游节点', 'Drag from here to the next node')} />
       {!isTrigger && (
-        <Handle id="error" type="source" position={Position.Bottom} className={`${handleBase} !bg-red-500/80`} />
+        <Handle id="error" type="source" position={Position.Bottom} className={`${handleBase} !bg-red-500/80`} title={tr('从这里拖出错误分支', 'Drag from here for the error branch')} />
       )}
     </div>
   );
@@ -585,9 +587,11 @@ export default function FlowEditorPage() {
   const pollRun = useCallback(
     (runID: string) => {
       if (pollRef.current) window.clearInterval(pollRef.current);
+      let consecutiveErrors = 0;
       const tick = async () => {
         try {
           const r = await getFlowRun(runID);
+          consecutiveErrors = 0;
           setActiveRun(r);
           applyRunToCanvas(r.nodes);
           if (r.run.status !== 'running' && r.run.status !== 'pending') {
@@ -604,8 +608,16 @@ export default function FlowEditorPage() {
               pollRef.current = null;
             }
           }
-        } catch {
-          /* transient poll errors ignored */
+        } catch (e) {
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= 3) {
+            if (pollRef.current) {
+              window.clearInterval(pollRef.current);
+              pollRef.current = null;
+            }
+            setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, runStatus: undefined } })));
+            setError(e instanceof Error ? e.message : tr('运行状态刷新失败', 'Failed to refresh run status'));
+          }
         }
       };
       void tick();
@@ -634,6 +646,22 @@ export default function FlowEditorPage() {
         return;
       }
     }
+    const referencedFields = requiredTriggerFieldsFromNodes(nodes);
+    if (referencedFields.includes('action') && input.action === undefined) {
+      input.action = '从事件 RCA Suggested Action 自动读取';
+    }
+    if (referencedFields.includes('payload') && input.payload === undefined) {
+      input.payload = { source: 'incident_rca', incident_id: input.incident_id ?? null };
+    }
+    const missing = referencedFields.filter((field) => input[field] === undefined || input[field] === '');
+    if (missing.length > 0) {
+      setRunInputErr(tr(`缺少必填触发参数：${missing.join('、')}`, `Missing required trigger input: ${missing.join(', ')}`));
+      setShowRunInput(true);
+      if (!txt) {
+        setRunInputText(JSON.stringify(Object.fromEntries(missing.map((field) => [field, field === 'incident_id' ? 0 : ''])), null, 2));
+      }
+      return;
+    }
     setRunInputErr('');
     // Don't launch a run against a flow whose latest edits failed to save —
     // it would execute the stale server-side graph and mislead the user.
@@ -646,7 +674,7 @@ export default function FlowEditorPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [flow, dirty, onSave, pollRun, runInputText, tr]);
+  }, [flow, dirty, nodes, onSave, pollRun, runInputText, tr]);
 
   const hasManualTrigger = useMemo(() => nodes.some((n) => n.data.flowType === 'trigger.manual'), [nodes]);
   // node id → descriptive canvas label, so the run detail shows "get_edge_summary"
@@ -831,6 +859,7 @@ export default function FlowEditorPage() {
             onSelectionChange={({ nodes: sel }) => { if (sel.length === 1) setSelectedID(sel[0].id); }}
             nodesDraggable={canWrite}
             nodesConnectable={canWrite}
+            connectionMode={ConnectionMode.Loose}
             elementsSelectable
             deleteKeyCode={canWrite ? ['Backspace', 'Delete'] : []}
             fitView
@@ -1086,6 +1115,17 @@ function RunStatusChip({ status }: { status: string }) {
           ? 'text-indigo-400'
           : 'text-zinc-500';
   return <span className={`text-[11px] ${cls}`}>{status}</span>;
+}
+
+function requiredTriggerFieldsFromNodes(nodes: CanvasNode[]): string[] {
+  const fields = new Set<string>();
+  for (const node of nodes) {
+    const text = JSON.stringify(node.data.config || {});
+    for (const match of text.matchAll(/\{\{\s*trigger\.([a-zA-Z0-9_]+)[^}]*\}\}/g)) {
+      fields.add(match[1]);
+    }
+  }
+  return [...fields];
 }
 
 function ConfigField({

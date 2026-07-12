@@ -195,6 +195,29 @@ func (r *SessionRepo) ListMessages(ctx context.Context, sessionID string, limit 
 	return out, nil
 }
 
+// ListInvestigationToolCalls returns every tool call written under a
+// system-spawned investigation transcript. It intentionally requires
+// chat_sessions.kind='investigation' so alert RCA drill-down cannot be
+// used as a generic cross-session tool-call reader.
+func (r *SessionRepo) ListInvestigationToolCalls(ctx context.Context, sessionID string) ([]*model.ToolCall, error) {
+	out := make([]*model.ToolCall, 0)
+	if sessionID == "" {
+		return out, nil
+	}
+	err := r.db.WithContext(ctx).
+		Model(&model.ToolCall{}).
+		Joins("JOIN chat_messages ON chat_messages.id = chat_tool_calls.message_id").
+		Joins("JOIN chat_sessions ON chat_sessions.id = chat_messages.session_id").
+		Where("chat_sessions.id = ?", sessionID).
+		Where("chat_sessions.kind = ?", model.SessionKindInvestigation).
+		Order("chat_tool_calls.created_at ASC, chat_tool_calls.id ASC").
+		Find(&out).Error
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // hydrateToolCalls batches one SELECT against chat_tool_calls keyed on
 // the assistant message ids in msgs, and attaches the rows to each
 // message in-place. Order within a single assistant turn is preserved

@@ -34,8 +34,14 @@ type Approval struct {
 
 	// Source records where the proposal came from for the UI: "agent"
 	// (chat) / "flow" (an approval node). SessionID optionally links back.
-	Source    string `gorm:"size:32;not null;default:agent" json:"source"`
-	SessionID string `gorm:"size:64;index" json:"session_id,omitempty"`
+	Source            string `gorm:"size:32;not null;default:agent" json:"source"`
+	SessionID         string `gorm:"size:64;index" json:"session_id,omitempty"`
+	IncidentID        uint64 `gorm:"not null;default:0;index" json:"incident_id,omitempty"`
+	SourceType        string `gorm:"size:32;not null;default:'';index" json:"source_type"`
+	RiskLevel         string `gorm:"size:16;not null;default:medium;index" json:"risk_level"`
+	ActionType        string `gorm:"size:32;not null;default:manual;index" json:"action_type"`
+	Recommendation    string `gorm:"type:text" json:"recommendation,omitempty"`
+	PrerequisitesJSON string `gorm:"type:text;not null" json:"prerequisites"`
 
 	// Status lifecycle. Constants below.
 	Status string `gorm:"size:16;not null;default:pending;index" json:"status"`
@@ -77,6 +83,10 @@ const (
 
 // Source constants.
 const (
-	SourceAgent = "agent"
-	SourceFlow  = "flow"
+	SourceAgent    = "agent"
+	SourceFlow     = "flow"
+	SourceIncident = "incident"
+	SourceRCA      = "rca"
+	SourceWorkflow = "workflow"
+	SourceSkill    = "skill"
 )

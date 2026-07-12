@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	aiopsmodel "github.com/ongridio/ongrid/internal/manager/model/aiops"
 	alertmodel "github.com/ongridio/ongrid/internal/manager/model/alert"
 	svc "github.com/ongridio/ongrid/internal/manager/service/alert"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
@@ -56,24 +57,24 @@ type fakeService struct {
 	testChannelResp *svc.ChannelTestResult
 	testChannelErr  error
 
-	listRulesResp        []*svc.Rule
-	listRulesErr         error
-	getRuleResp          *svc.Rule
-	getRuleErr           error
-	createRuleResp       *svc.Rule
-	createRuleErr        error
-	updateRuleResp       *svc.Rule
-	updateRuleErr        error
-	enabledRuleResp      *svc.Rule
-	enabledRuleErr       error
-	deleteRuleErr        error
-	lastRuleScope        string
-	lastRuleID           uint64
-	lastRuleInput        svc.RuleInput
-	lastRuleEnabledV     bool
-	previewRuleResp      *svc.PreviewResult
-	previewRuleErr       error
-	lastPreviewLookback  int
+	listRulesResp       []*svc.Rule
+	listRulesErr        error
+	getRuleResp         *svc.Rule
+	getRuleErr          error
+	createRuleResp      *svc.Rule
+	createRuleErr       error
+	updateRuleResp      *svc.Rule
+	updateRuleErr       error
+	enabledRuleResp     *svc.Rule
+	enabledRuleErr      error
+	deleteRuleErr       error
+	lastRuleScope       string
+	lastRuleID          uint64
+	lastRuleInput       svc.RuleInput
+	lastRuleEnabledV    bool
+	previewRuleResp     *svc.PreviewResult
+	previewRuleErr      error
+	lastPreviewLookback int
 
 	lastCaller       svc.Caller
 	lastFilter       svc.IncidentFilter
@@ -83,6 +84,26 @@ type fakeService struct {
 	lastChannelInput svc.ChannelInput
 	lastPage         int
 	lastPageSize     int
+}
+
+type fakeInvestigationReader struct {
+	report *alertmodel.InvestigationReport
+	err    error
+}
+
+func (f fakeInvestigationReader) GetByIncident(_ context.Context, _ uint64) (*alertmodel.InvestigationReport, error) {
+	return f.report, f.err
+}
+
+type fakeTraceReader struct {
+	sessionID string
+	rows      []*aiopsmodel.ToolCall
+	err       error
+}
+
+func (f *fakeTraceReader) ListInvestigationToolCalls(_ context.Context, sessionID string) ([]*aiopsmodel.ToolCall, error) {
+	f.sessionID = sessionID
+	return f.rows, f.err
 }
 
 func (f *fakeService) ListRules(_ context.Context, caller svc.Caller, scope string) ([]*svc.Rule, error) {
@@ -144,6 +165,11 @@ func (f *fakeService) GetIncident(_ context.Context, caller svc.Caller, id uint6
 	f.lastCaller = caller
 	f.lastIncidentID = id
 	return f.getIncidentResp, f.getIncidentErr
+}
+
+func (f *fakeService) IngestAlertmanager(_ context.Context, caller svc.Caller, in svc.AlertmanagerWebhook) (*svc.AlertmanagerIngestResult, error) {
+	f.lastCaller = caller
+	return &svc.AlertmanagerIngestResult{Accepted: len(in.Alerts)}, nil
 }
 
 func (f *fakeService) GetIncidentModel(_ context.Context, _ svc.Caller, _ uint64) (*alertmodel.Incident, error) {
@@ -410,6 +436,64 @@ func TestListIncidentEventsHappyPath(t *testing.T) {
 	}
 }
 
+func TestListInvestigationToolCallsHappyPath(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 2, 10, 0, 0, 0, time.UTC)
+	auditSessionID := "11111111-1111-1111-1111-111111111111"
+	llmCallID := "call_abc"
+	result := `{"stdout":"ok"}`
+	trace := &fakeTraceReader{rows: []*aiopsmodel.ToolCall{{
+		ID:            "22222222-2222-2222-2222-222222222222",
+		LLMCallID:     &llmCallID,
+		MessageID:     "33333333-3333-3333-3333-333333333333",
+		ToolName:      "host_bash",
+		ArgumentsJSON: `{"cmd":"uptime"}`,
+		ResultJSON:    &result,
+		Status:        aiopsmodel.StatusSuccess,
+		StartedAt:     now,
+		EndedAt:       ptrTime(now.Add(1250 * time.Millisecond)),
+		CreatedAt:     now,
+	}}}
+	f := &fakeService{getIncidentResp: &svc.Incident{ID: 11}}
+	h := NewHandler(f, f, f).
+		WithInvestigations(fakeInvestigationReader{report: &alertmodel.InvestigationReport{
+			IncidentID:     11,
+			Status:         alertmodel.InvestigationStatusReady,
+			AuditSessionID: &auditSessionID,
+			StatusReason:   "",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}}).
+		WithInvestigationTrace(trace)
+	router := buildRouter(h, &tenantctx.Tenant{UserID: 7, Role: "user"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/alerts/incidents/11/investigation/tool-calls", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if trace.sessionID != auditSessionID {
+		t.Fatalf("trace sessionID = %q, want %q", trace.sessionID, auditSessionID)
+	}
+	var body listInvestigationToolCallsResp
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Total != 1 || len(body.Items) != 1 {
+		t.Fatalf("body = %+v", body)
+	}
+	got := body.Items[0]
+	if got.ToolName != "host_bash" || got.Status != aiopsmodel.StatusSuccess || got.DurationMS == nil || *got.DurationMS != 1250 {
+		t.Fatalf("tool call = %+v", got)
+	}
+	if string(got.Arguments) != `{"cmd":"uptime"}` || string(got.Result) != result {
+		t.Fatalf("json payloads args=%s result=%s", got.Arguments, got.Result)
+	}
+}
+
 func TestSilenceIncidentHappyPath(t *testing.T) {
 	t.Parallel()
 
@@ -454,3 +538,5 @@ func TestListChannelsRequiresAuth(t *testing.T) {
 		t.Fatalf("status = %d, want 401", w.Code)
 	}
 }
+
+func ptrTime(t time.Time) *time.Time { return &t }

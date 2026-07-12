@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/ongridio/ongrid/internal/edgeagent/cmdpolicy"
@@ -40,6 +42,9 @@ import (
 // continues with the default-only baseline so a typo can't hose the
 // agent.
 const DefaultPolicyOverridePath = "/etc/ongrid-edge/bash-policy.yaml"
+const managedPolicyStatePath = "/var/lib/ongrid-edge/security-policy.json"
+
+var liveSandbox atomic.Pointer[cmdpolicy.Sandbox]
 
 // Register installs the bash.exec handler on client. log may be nil
 // (defaults to slog.Default()). Returns an error only when the
@@ -64,6 +69,10 @@ func Register(client tunnel.Client, log *slog.Logger) error {
 				slog.String("path", DefaultPolicyOverridePath))
 		}
 	}
+	state := readManagedPolicy()
+	if state.Enabled {
+		policy = cmdpolicy.EnableDockerReadOnly(policy)
+	}
 
 	pathValidator := host_files.DefaultSandboxConfig()
 	if err := pathValidator.Validate(); err != nil {
@@ -81,6 +90,7 @@ func Register(client tunnel.Client, log *slog.Logger) error {
 		PathValidator: pathValidator,
 		Logger:        log,
 	}
+	liveSandbox.Store(sandbox)
 
 	log.Info("bash: sandbox ready",
 		slog.String("policy", "read-only"),
@@ -89,8 +99,89 @@ func Register(client tunnel.Client, log *slog.Logger) error {
 		slog.Int("network_host_allowlist", len(policy.NetworkHostAllowlist)),
 	)
 
-	client.RegisterHandler(tunnel.MethodBashExec, makeHandler(sandbox, log))
+	client.RegisterHandler(tunnel.MethodBashExec, makeLiveHandler(log))
+	client.RegisterHandler(tunnel.MethodSecurityPolicy, makeSecurityPolicyHandler(pathValidator, log))
 	return nil
+}
+
+type managedPolicyState struct {
+	Preset    string    `json:"preset"`
+	Enabled   bool      `json:"enabled"`
+	AppliedAt time.Time `json:"applied_at,omitempty"`
+}
+
+func readManagedPolicy() managedPolicyState {
+	var state managedPolicyState
+	raw, err := os.ReadFile(managedPolicyStatePath)
+	if err == nil {
+		_ = json.Unmarshal(raw, &state)
+	}
+	return state
+}
+
+func makeLiveHandler(log *slog.Logger) tunnel.Handler {
+	return func(ctx context.Context, session tunnel.Session, method string, body []byte) ([]byte, error) {
+		sandbox := liveSandbox.Load()
+		if sandbox == nil {
+			return nil, fmt.Errorf("bash: sandbox not configured")
+		}
+		return makeHandler(sandbox, log)(ctx, session, method, body)
+	}
+}
+
+func makeSecurityPolicyHandler(pathValidator *host_files.SandboxConfig, log *slog.Logger) tunnel.Handler {
+	return func(_ context.Context, _ tunnel.Session, _ string, body []byte) ([]byte, error) {
+		var req tunnel.SecurityPolicyRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			return nil, fmt.Errorf("security policy: bad request: %w", err)
+		}
+		if req.Preset != "" && req.Preset != "docker-readonly" {
+			return nil, fmt.Errorf("security policy: unknown preset %q", req.Preset)
+		}
+		state := readManagedPolicy()
+		if req.Action == "apply" {
+			state = managedPolicyState{Preset: "docker-readonly", Enabled: req.Enabled, AppliedAt: time.Now().UTC()}
+			policy := cmdpolicy.DefaultReadOnly()
+			if _, err := os.Stat(DefaultPolicyOverridePath); err == nil {
+				merged, loadErr := cmdpolicy.LoadFromYAML(DefaultPolicyOverridePath, policy)
+				if loadErr != nil {
+					return nil, fmt.Errorf("security policy: load local override: %w", loadErr)
+				}
+				policy = merged
+			}
+			if state.Enabled {
+				policy = cmdpolicy.EnableDockerReadOnly(policy)
+			}
+			raw, _ := json.Marshal(state)
+			if err := os.MkdirAll(filepath.Dir(managedPolicyStatePath), 0o750); err != nil {
+				return nil, fmt.Errorf("security policy: create state dir: %w", err)
+			}
+			if err := os.WriteFile(managedPolicyStatePath, raw, 0o600); err != nil {
+				return nil, fmt.Errorf("security policy: persist: %w", err)
+			}
+			liveSandbox.Store(&cmdpolicy.Sandbox{Policy: policy, PathValidator: pathValidator, Logger: log})
+			log.Info("security policy applied", slog.String("preset", state.Preset), slog.Bool("enabled", state.Enabled))
+		} else if req.Action != "get" {
+			return nil, fmt.Errorf("security policy: action must be get or apply")
+		}
+		sandbox := liveSandbox.Load()
+		dockerAvailable := false
+		if sandbox != nil && sandbox.Policy != nil {
+			if bp := sandbox.Policy.Lookup("docker"); bp != nil {
+				dockerAvailable = bp.AbsPath != ""
+			}
+		}
+		appliedAt := ""
+		if !state.AppliedAt.IsZero() {
+			appliedAt = state.AppliedAt.Format(time.RFC3339)
+		}
+		return json.Marshal(tunnel.SecurityPolicyResponse{
+			Preset:          "docker-readonly",
+			Enabled:         state.Enabled,
+			DockerAvailable: dockerAvailable,
+			AppliedAt:       appliedAt,
+		})
+	}
 }
 
 // makeHandler is split out so tests can wire a sandbox directly without

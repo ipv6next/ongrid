@@ -44,6 +44,34 @@ type Device struct {
 	Name        string `gorm:"size:255;not null;default:''"`
 	Description string `gorm:"size:255;not null;default:''"`
 
+	// Asset profile fields are operator-owned metadata used by the
+	// AI-SecOps product surface. They connect low-level host facts to
+	// enterprise operations context without changing edge identity.
+	BusinessSystem    string `gorm:"size:128;not null;default:'';column:business_system"`
+	Environment       string `gorm:"size:32;not null;default:'';column:environment"`
+	Region            string `gorm:"size:64;not null;default:'';column:region"`
+	Datacenter        string `gorm:"size:64;not null;default:'';column:datacenter"`
+	CloudProvider     string `gorm:"size:64;not null;default:'';column:cloud_provider"`
+	Owner             string `gorm:"size:128;not null;default:'';column:owner"`
+	Criticality       string `gorm:"size:16;not null;default:'';column:criticality"`
+	SecurityLevel     string `gorm:"size:32;not null;default:'';column:security_level"`
+	MaintenanceWindow string `gorm:"size:128;not null;default:'';column:maintenance_window"`
+	Tags              string `gorm:"size:512;not null;default:'';column:tags"`
+
+	// Asset onboarding fields. AssetType describes what is being managed
+	// (server / network / database / middleware / app / other).
+	// CollectionMode records how Ongrid observes it: edge_agent for an
+	// installed edge, prometheus for externally scraped metrics, loki for
+	// log-only assets, snmp/api/manual for non-server devices.
+	AssetType          string  `gorm:"size:32;not null;default:'server';column:asset_type;index:idx_devices_asset_type"`
+	CollectionMode     string  `gorm:"size:32;not null;default:'edge_agent';column:collection_mode;index:idx_devices_collection_mode"`
+	ExternalSource     string  `gorm:"size:64;not null;default:'';column:external_source"`
+	ExternalRef        string  `gorm:"size:128;not null;default:'';column:external_ref"`
+	MetricDatasourceID *uint64 `gorm:"column:metric_datasource_id;index"`
+	MetricMatcher      string  `gorm:"size:512;not null;default:'';column:metric_matcher"`
+	LogDatasourceID    *uint64 `gorm:"column:log_datasource_id;index"`
+	LogMatcher         string  `gorm:"size:512;not null;default:'';column:log_matcher"`
+
 	Hostname      string `gorm:"size:255;not null"`
 	OS            string `gorm:"size:64;not null"`
 	OSVersion     string `gorm:"size:128;not null;default:'';column:os_version"`

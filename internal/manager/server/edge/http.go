@@ -22,10 +22,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	bizaudit "github.com/ongridio/ongrid/internal/manager/biz/audit"
 	devicebiz "github.com/ongridio/ongrid/internal/manager/biz/device"
 	biz "github.com/ongridio/ongrid/internal/manager/biz/edge"
+	auditmodel "github.com/ongridio/ongrid/internal/manager/model/audit"
 	devicemodel "github.com/ongridio/ongrid/internal/manager/model/device"
 	model "github.com/ongridio/ongrid/internal/manager/model/edge"
+	auditmw "github.com/ongridio/ongrid/internal/manager/server/middleware"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
@@ -49,6 +52,8 @@ type EdgeService interface {
 	FetchPackage(ctx context.Context, edgeID uint64, url, sha256, version string) (tunnel.FetchPackageResponse, error)
 	ApplyPackage(ctx context.Context, edgeID uint64) (tunnel.ApplyPackageResponse, error)
 	GetProcessList(ctx context.Context, edgeID uint64, topN uint32, sortBy string) (tunnel.GetProcessListResponse, error)
+	GetSecurityPolicy(ctx context.Context, edgeID uint64) (tunnel.SecurityPolicyResponse, error)
+	ApplySecurityPolicy(ctx context.Context, edgeID uint64, enabled bool) (tunnel.SecurityPolicyResponse, error)
 	PluginHealth(edgeID uint64) []biz.PluginHealth
 }
 
@@ -165,10 +170,57 @@ func (h *Handler) Register(r chi.Router) {
 	// Process list — read-only host introspection. Monitor page's
 	// per-device process panel calls this; same RPC the LLM tool uses.
 	r.Get("/v1/edges/{id}/processes", h.getProcesses)
+	r.Get("/v1/edges/{id}/security-policy", h.getSecurityPolicy)
+	r.With(h.writeMW("edge:security-policy")).Put("/v1/edges/{id}/security-policy", h.applySecurityPolicy)
 	// Plugin runtime
 	r.Get("/v1/edges/{id}/plugins", h.listPlugins)
 	r.With(h.writeMW("edge:plugin")).Put("/v1/edges/{id}/plugins/{name}", h.setPlugin)
 	r.Get("/v1/integrations/plugin-counts", h.pluginCounts)
+}
+
+func (h *Handler) getSecurityPolicy(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	resp, err := h.svc.GetSecurityPolicy(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) applySecurityPolicy(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, errors.Join(errs.ErrInvalid, err))
+		return
+	}
+	auditmw.SetAuditEvent(r, bizaudit.Event{
+		Action:       auditmodel.ActionSecurityPolicyUpdate,
+		ResourceType: auditmodel.ResourceEdge,
+		ResourceID:   strconv.FormatUint(id, 10),
+		ResourceName: "Docker 只读巡检策略",
+		Payload: map[string]any{
+			"preset":  "docker-readonly",
+			"enabled": req.Enabled,
+		},
+	})
+	resp, err := h.svc.ApplySecurityPolicy(r.Context(), id, req.Enabled)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- plugin runtime endpoints ----------------------------------
@@ -365,9 +417,10 @@ type listItem struct {
 	AccessKeyID string     `json:"access_key_id"`
 	// AgentVersion = self-reported on register_edge (optional). Empty
 	// for edges that registered with a pre-introduction binary.
-	AgentVersion string       `json:"agent_version,omitempty"`
-	DeviceID     *uint64      `json:"device_id,omitempty"`
-	HostInfo     *hostInfoDTO `json:"host_info,omitempty"`
+	AgentVersion string          `json:"agent_version,omitempty"`
+	DeviceID     *uint64         `json:"device_id,omitempty"`
+	HostInfo     *hostInfoDTO    `json:"host_info,omitempty"`
+	AssetProfile assetProfileDTO `json:"asset_profile"`
 }
 
 type listResp struct {
@@ -376,17 +429,39 @@ type listResp struct {
 }
 
 type getResp struct {
-	ID           uint64       `json:"id"`
-	Name         string       `json:"name"`
-	Status       string       `json:"status"`
-	Roles        []string     `json:"roles"`
-	AccessKeyID  string       `json:"access_key_id"`
-	LastSeenAt   *time.Time   `json:"last_seen_at"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
-	AgentVersion string       `json:"agent_version,omitempty"`
-	DeviceID     *uint64      `json:"device_id,omitempty"`
-	HostInfo     *hostInfoDTO `json:"host_info,omitempty"`
+	ID           uint64          `json:"id"`
+	Name         string          `json:"name"`
+	Status       string          `json:"status"`
+	Roles        []string        `json:"roles"`
+	AccessKeyID  string          `json:"access_key_id"`
+	LastSeenAt   *time.Time      `json:"last_seen_at"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+	AgentVersion string          `json:"agent_version,omitempty"`
+	DeviceID     *uint64         `json:"device_id,omitempty"`
+	HostInfo     *hostInfoDTO    `json:"host_info,omitempty"`
+	AssetProfile assetProfileDTO `json:"asset_profile"`
+}
+
+type assetProfileDTO struct {
+	BusinessSystem     string   `json:"business_system,omitempty"`
+	Environment        string   `json:"environment,omitempty"`
+	Region             string   `json:"region,omitempty"`
+	Datacenter         string   `json:"datacenter,omitempty"`
+	CloudProvider      string   `json:"cloud_provider,omitempty"`
+	Owner              string   `json:"owner,omitempty"`
+	Criticality        string   `json:"criticality,omitempty"`
+	SecurityLevel      string   `json:"security_level,omitempty"`
+	MaintenanceWindow  string   `json:"maintenance_window,omitempty"`
+	Tags               []string `json:"tags,omitempty"`
+	AssetType          string   `json:"asset_type,omitempty"`
+	CollectionMode     string   `json:"collection_mode,omitempty"`
+	ExternalSource     string   `json:"external_source,omitempty"`
+	ExternalRef        string   `json:"external_ref,omitempty"`
+	MetricDatasourceID *uint64  `json:"metric_datasource_id,omitempty"`
+	MetricMatcher      string   `json:"metric_matcher,omitempty"`
+	LogDatasourceID    *uint64  `json:"log_datasource_id,omitempty"`
+	LogMatcher         string   `json:"log_matcher,omitempty"`
 }
 
 type rotateResp struct {
@@ -461,6 +536,7 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 			AgentVersion: e.AgentVersion,
 			DeviceID:     e.DeviceID,
 			HostInfo:     deviceToHostInfo(dev),
+			AssetProfile: deviceToAssetProfile(dev),
 		})
 	}
 	writeJSON(w, http.StatusOK, listResp{Items: items, Total: len(items)})
@@ -494,6 +570,7 @@ func (h *Handler) getEdge(w http.ResponseWriter, r *http.Request) {
 		AgentVersion: e.AgentVersion,
 		DeviceID:     e.DeviceID,
 		HostInfo:     deviceToHostInfo(dev),
+		AssetProfile: deviceToAssetProfile(dev),
 	})
 }
 
@@ -1010,6 +1087,46 @@ func deviceToHostInfo(d *devicemodel.Device) *hostInfoDTO {
 		MemTotalBytes: d.MemTotalBytes,
 		IPAddress:     d.IPAddress,
 	}
+}
+
+func deviceToAssetProfile(d *devicemodel.Device) assetProfileDTO {
+	if d == nil {
+		return assetProfileDTO{Tags: []string{}}
+	}
+	return assetProfileDTO{
+		BusinessSystem:     d.BusinessSystem,
+		Environment:        d.Environment,
+		Region:             d.Region,
+		Datacenter:         d.Datacenter,
+		CloudProvider:      d.CloudProvider,
+		Owner:              d.Owner,
+		Criticality:        d.Criticality,
+		SecurityLevel:      d.SecurityLevel,
+		MaintenanceWindow:  d.MaintenanceWindow,
+		Tags:               splitTags(d.Tags),
+		AssetType:          d.AssetType,
+		CollectionMode:     d.CollectionMode,
+		ExternalSource:     d.ExternalSource,
+		ExternalRef:        d.ExternalRef,
+		MetricDatasourceID: d.MetricDatasourceID,
+		MetricMatcher:      d.MetricMatcher,
+		LogDatasourceID:    d.LogDatasourceID,
+		LogMatcher:         d.LogMatcher,
+	}
+}
+
+func splitTags(raw string) []string {
+	if raw == "" {
+		return []string{}
+	}
+	out := make([]string, 0, 8)
+	for _, part := range strings.Split(raw, ",") {
+		tag := strings.TrimSpace(part)
+		if tag != "" {
+			out = append(out, tag)
+		}
+	}
+	return out
 }
 
 // errCode turns a sentinel error into a stable kebab-case identifier for

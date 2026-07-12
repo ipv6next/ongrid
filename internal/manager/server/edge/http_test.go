@@ -68,7 +68,8 @@ func (d *fakeDeviceRepo) UpdateRoles(context.Context, uint64, uint8) error      
 func (d *fakeDeviceRepo) UpdateNameDescription(context.Context, uint64, string, string) error {
 	return nil
 }
-func (d *fakeDeviceRepo) SetNodeID(context.Context, uint64, uint64) error { return nil }
+func (d *fakeDeviceRepo) UpdateProfile(context.Context, uint64, devicebiz.Profile) error { return nil }
+func (d *fakeDeviceRepo) SetNodeID(context.Context, uint64, uint64) error                { return nil }
 func (d *fakeDeviceRepo) List(context.Context, devicebiz.ListFilter) ([]*devicemodel.Device, error) {
 	out := make([]*devicemodel.Device, 0, len(d.byID))
 	for _, v := range d.byID {
@@ -175,6 +176,12 @@ func (f *fakeSvc) ApplyPackage(_ context.Context, _ uint64) (tunnel.ApplyPackage
 }
 func (f *fakeSvc) GetProcessList(_ context.Context, _ uint64, _ uint32, _ string) (tunnel.GetProcessListResponse, error) {
 	return tunnel.GetProcessListResponse{}, nil
+}
+func (f *fakeSvc) GetSecurityPolicy(_ context.Context, _ uint64) (tunnel.SecurityPolicyResponse, error) {
+	return tunnel.SecurityPolicyResponse{Preset: "docker-readonly"}, nil
+}
+func (f *fakeSvc) ApplySecurityPolicy(_ context.Context, _ uint64, enabled bool) (tunnel.SecurityPolicyResponse, error) {
+	return tunnel.SecurityPolicyResponse{Preset: "docker-readonly", Enabled: enabled}, nil
 }
 func (f *fakeSvc) PluginHealth(_ uint64) []biz.PluginHealth { return nil }
 

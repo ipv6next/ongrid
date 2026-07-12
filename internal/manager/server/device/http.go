@@ -73,25 +73,43 @@ func (h *Handler) requireAdmin(next http.Handler) http.Handler {
 // --- DTOs ---
 
 type deviceItem struct {
-	ID             uint64     `json:"id"`
-	Name           string     `json:"name"`
-	Description    string     `json:"description,omitempty"`
-	Hostname       string     `json:"hostname,omitempty"`
-	OS             string     `json:"os,omitempty"`
-	OSVersion      string     `json:"os_version,omitempty"`
-	Arch           string     `json:"arch,omitempty"`
-	KernelVersion  string     `json:"kernel_version,omitempty"`
-	IPAddress      string     `json:"ip_address,omitempty"`
-	CPUCount       int        `json:"cpu_count,omitempty"`
-	MemTotalBytes  uint64     `json:"mem_total_bytes,omitempty"`
-	DiskTotalBytes uint64     `json:"disk_total_bytes,omitempty"`
-	CPUUsagePct    float32    `json:"cpu_usage_pct"`
-	MemUsagePct    float32    `json:"mem_usage_pct"`
-	DiskUsagePct   float32    `json:"disk_usage_pct"`
-	Roles          []string   `json:"roles"`
-	Online         bool       `json:"online"`
-	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	ID                 uint64     `json:"id"`
+	Name               string     `json:"name"`
+	Description        string     `json:"description,omitempty"`
+	BusinessSystem     string     `json:"business_system,omitempty"`
+	Environment        string     `json:"environment,omitempty"`
+	Region             string     `json:"region,omitempty"`
+	Datacenter         string     `json:"datacenter,omitempty"`
+	CloudProvider      string     `json:"cloud_provider,omitempty"`
+	Owner              string     `json:"owner,omitempty"`
+	Criticality        string     `json:"criticality,omitempty"`
+	SecurityLevel      string     `json:"security_level,omitempty"`
+	MaintenanceWindow  string     `json:"maintenance_window,omitempty"`
+	Tags               []string   `json:"tags,omitempty"`
+	AssetType          string     `json:"asset_type,omitempty"`
+	CollectionMode     string     `json:"collection_mode,omitempty"`
+	ExternalSource     string     `json:"external_source,omitempty"`
+	ExternalRef        string     `json:"external_ref,omitempty"`
+	MetricDatasourceID *uint64    `json:"metric_datasource_id,omitempty"`
+	MetricMatcher      string     `json:"metric_matcher,omitempty"`
+	LogDatasourceID    *uint64    `json:"log_datasource_id,omitempty"`
+	LogMatcher         string     `json:"log_matcher,omitempty"`
+	Hostname           string     `json:"hostname,omitempty"`
+	OS                 string     `json:"os,omitempty"`
+	OSVersion          string     `json:"os_version,omitempty"`
+	Arch               string     `json:"arch,omitempty"`
+	KernelVersion      string     `json:"kernel_version,omitempty"`
+	IPAddress          string     `json:"ip_address,omitempty"`
+	CPUCount           int        `json:"cpu_count,omitempty"`
+	MemTotalBytes      uint64     `json:"mem_total_bytes,omitempty"`
+	DiskTotalBytes     uint64     `json:"disk_total_bytes,omitempty"`
+	CPUUsagePct        float32    `json:"cpu_usage_pct"`
+	MemUsagePct        float32    `json:"mem_usage_pct"`
+	DiskUsagePct       float32    `json:"disk_usage_pct"`
+	Roles              []string   `json:"roles"`
+	Online             bool       `json:"online"`
+	LastSeenAt         *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
 	// NodeID is the link to the topology `nodes` table. Lets
 	// the SPA's device-detail Topology tab resolve neighbours without
 	// a separate /v1/topology lookup. Nullable until topology.Migrate
@@ -105,8 +123,26 @@ type listResp struct {
 }
 
 type updateReq struct {
-	Name        *string `json:"name,omitempty"`
-	Description *string `json:"description,omitempty"`
+	Name               *string  `json:"name,omitempty"`
+	Description        *string  `json:"description,omitempty"`
+	BusinessSystem     *string  `json:"business_system,omitempty"`
+	Environment        *string  `json:"environment,omitempty"`
+	Region             *string  `json:"region,omitempty"`
+	Datacenter         *string  `json:"datacenter,omitempty"`
+	CloudProvider      *string  `json:"cloud_provider,omitempty"`
+	Owner              *string  `json:"owner,omitempty"`
+	Criticality        *string  `json:"criticality,omitempty"`
+	SecurityLevel      *string  `json:"security_level,omitempty"`
+	MaintenanceWindow  *string  `json:"maintenance_window,omitempty"`
+	Tags               []string `json:"tags,omitempty"`
+	AssetType          *string  `json:"asset_type,omitempty"`
+	CollectionMode     *string  `json:"collection_mode,omitempty"`
+	ExternalSource     *string  `json:"external_source,omitempty"`
+	ExternalRef        *string  `json:"external_ref,omitempty"`
+	MetricDatasourceID *uint64  `json:"metric_datasource_id,omitempty"`
+	MetricMatcher      *string  `json:"metric_matcher,omitempty"`
+	LogDatasourceID    *uint64  `json:"log_datasource_id,omitempty"`
+	LogMatcher         *string  `json:"log_matcher,omitempty"`
 }
 
 type updateRolesReq struct {
@@ -226,13 +262,106 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	}
 	name := d.Name
 	desc := d.Description
+	businessSystem := d.BusinessSystem
+	environment := d.Environment
+	region := d.Region
+	datacenter := d.Datacenter
+	cloudProvider := d.CloudProvider
+	owner := d.Owner
+	criticality := d.Criticality
+	securityLevel := d.SecurityLevel
+	maintenanceWindow := d.MaintenanceWindow
+	assetType := d.AssetType
+	collectionMode := d.CollectionMode
+	externalSource := d.ExternalSource
+	externalRef := d.ExternalRef
+	metricDatasourceID := d.MetricDatasourceID
+	metricMatcher := d.MetricMatcher
+	logDatasourceID := d.LogDatasourceID
+	logMatcher := d.LogMatcher
+	tags := splitTags(d.Tags)
 	if in.Name != nil {
 		name = *in.Name
 	}
 	if in.Description != nil {
 		desc = *in.Description
 	}
-	if err := h.uc.UpdateNameDescription(r.Context(), id, name, desc); err != nil {
+	if in.BusinessSystem != nil {
+		businessSystem = *in.BusinessSystem
+	}
+	if in.Environment != nil {
+		environment = *in.Environment
+	}
+	if in.Region != nil {
+		region = *in.Region
+	}
+	if in.Datacenter != nil {
+		datacenter = *in.Datacenter
+	}
+	if in.CloudProvider != nil {
+		cloudProvider = *in.CloudProvider
+	}
+	if in.Owner != nil {
+		owner = *in.Owner
+	}
+	if in.Criticality != nil {
+		criticality = *in.Criticality
+	}
+	if in.SecurityLevel != nil {
+		securityLevel = *in.SecurityLevel
+	}
+	if in.MaintenanceWindow != nil {
+		maintenanceWindow = *in.MaintenanceWindow
+	}
+	if in.Tags != nil {
+		tags = in.Tags
+	}
+	if in.AssetType != nil {
+		assetType = *in.AssetType
+	}
+	if in.CollectionMode != nil {
+		collectionMode = *in.CollectionMode
+	}
+	if in.ExternalSource != nil {
+		externalSource = *in.ExternalSource
+	}
+	if in.ExternalRef != nil {
+		externalRef = *in.ExternalRef
+	}
+	if in.MetricDatasourceID != nil {
+		metricDatasourceID = datasourceIDOrNil(*in.MetricDatasourceID)
+	}
+	if in.MetricMatcher != nil {
+		metricMatcher = *in.MetricMatcher
+	}
+	if in.LogDatasourceID != nil {
+		logDatasourceID = datasourceIDOrNil(*in.LogDatasourceID)
+	}
+	if in.LogMatcher != nil {
+		logMatcher = *in.LogMatcher
+	}
+	if err := h.uc.UpdateProfile(r.Context(), id, devicebiz.Profile{
+		Name:               name,
+		Description:        desc,
+		BusinessSystem:     businessSystem,
+		Environment:        environment,
+		Region:             region,
+		Datacenter:         datacenter,
+		CloudProvider:      cloudProvider,
+		Owner:              owner,
+		Criticality:        criticality,
+		SecurityLevel:      securityLevel,
+		MaintenanceWindow:  maintenanceWindow,
+		Tags:               tags,
+		AssetType:          assetType,
+		CollectionMode:     collectionMode,
+		ExternalSource:     externalSource,
+		ExternalRef:        externalRef,
+		MetricDatasourceID: metricDatasourceID,
+		MetricMatcher:      metricMatcher,
+		LogDatasourceID:    logDatasourceID,
+		LogMatcher:         logMatcher,
+	}); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -306,27 +435,66 @@ func (h *Handler) listEdges(w http.ResponseWriter, r *http.Request) {
 
 func devToItem(d *devicemodel.Device) deviceItem {
 	return deviceItem{
-		ID:             d.ID,
-		Name:           d.Name,
-		Description:    d.Description,
-		Hostname:       d.Hostname,
-		OS:             d.OS,
-		OSVersion:      d.OSVersion,
-		Arch:           d.Arch,
-		KernelVersion:  d.KernelVersion,
-		IPAddress:      d.IPAddress,
-		CPUCount:       d.CPUCount,
-		MemTotalBytes:  d.MemTotalBytes,
-		DiskTotalBytes: d.DiskTotalBytes,
-		CPUUsagePct:    d.CPUUsagePct,
-		MemUsagePct:    d.MemUsagePct,
-		DiskUsagePct:   d.DiskUsagePct,
-		Roles:          devicemodel.DecodeRoles(d.Roles),
-		Online:         d.Online,
-		LastSeenAt:     d.LastSeenAt,
-		CreatedAt:      d.CreatedAt,
-		NodeID:         d.NodeID,
+		ID:                 d.ID,
+		Name:               d.Name,
+		Description:        d.Description,
+		BusinessSystem:     d.BusinessSystem,
+		Environment:        d.Environment,
+		Region:             d.Region,
+		Datacenter:         d.Datacenter,
+		CloudProvider:      d.CloudProvider,
+		Owner:              d.Owner,
+		Criticality:        d.Criticality,
+		SecurityLevel:      d.SecurityLevel,
+		MaintenanceWindow:  d.MaintenanceWindow,
+		Tags:               splitTags(d.Tags),
+		AssetType:          d.AssetType,
+		CollectionMode:     d.CollectionMode,
+		ExternalSource:     d.ExternalSource,
+		ExternalRef:        d.ExternalRef,
+		MetricDatasourceID: d.MetricDatasourceID,
+		MetricMatcher:      d.MetricMatcher,
+		LogDatasourceID:    d.LogDatasourceID,
+		LogMatcher:         d.LogMatcher,
+		Hostname:           d.Hostname,
+		OS:                 d.OS,
+		OSVersion:          d.OSVersion,
+		Arch:               d.Arch,
+		KernelVersion:      d.KernelVersion,
+		IPAddress:          d.IPAddress,
+		CPUCount:           d.CPUCount,
+		MemTotalBytes:      d.MemTotalBytes,
+		DiskTotalBytes:     d.DiskTotalBytes,
+		CPUUsagePct:        d.CPUUsagePct,
+		MemUsagePct:        d.MemUsagePct,
+		DiskUsagePct:       d.DiskUsagePct,
+		Roles:              devicemodel.DecodeRoles(d.Roles),
+		Online:             d.Online,
+		LastSeenAt:         d.LastSeenAt,
+		CreatedAt:          d.CreatedAt,
+		NodeID:             d.NodeID,
 	}
+}
+
+func splitTags(raw string) []string {
+	if raw == "" {
+		return []string{}
+	}
+	out := make([]string, 0, 8)
+	for _, part := range strings.Split(raw, ",") {
+		tag := strings.TrimSpace(part)
+		if tag != "" {
+			out = append(out, tag)
+		}
+	}
+	return out
+}
+
+func datasourceIDOrNil(id uint64) *uint64 {
+	if id == 0 {
+		return nil
+	}
+	return &id
 }
 
 func relType(t devicemodel.EdgeDeviceRelationType) string {

@@ -26,8 +26,8 @@ const ToolNameQueryEdges = "query_devices"
 // Phrased to direct the model here whenever the question is about which
 // devices (machines) match a coarse status / role / freshness filter.
 const QueryEdgesDescription = "List ongrid-managed devices (hosts) filtered by role, online status, last-seen freshness or a name substring. " +
-	"Use this whenever the question is about which machines exist or which ones match a coarse attribute. " +
-	"Returns an array of {device_id, name, hostname, online, roles, last_seen_at}; use device_id (NOT edge_id) in any PromQL/LogQL/TraceQL you generate."
+	"Use this whenever the question is about which machines exist or which ones match a coarse technical or business attribute. " +
+	"Returns devices with asset_profile business context; use device_id (NOT edge_id) in any PromQL/LogQL/TraceQL you generate."
 
 // QueryEdgesSchema is the JSON Schema of the tool's argument object.
 var QueryEdgesSchema = json.RawMessage(`{
@@ -52,6 +52,34 @@ var QueryEdgesSchema = json.RawMessage(`{
       "type": "string",
       "description": "Substring filter against device name (case-sensitive)."
     },
+    "business_system": {
+      "type": "string",
+      "description": "Filter by business system/application name substring, e.g. Payment, OA, CRM."
+    },
+    "environment": {
+      "type": "string",
+      "description": "Filter by operator-defined environment, e.g. 生产, 预发, 测试, prod."
+    },
+    "region": {
+      "type": "string",
+      "description": "Filter by operator-defined business region, e.g. 华东, 华北, APAC."
+    },
+    "datacenter": {
+      "type": "string",
+      "description": "Filter by datacenter or availability-zone substring, e.g. 上海-A, cn-shanghai-a."
+    },
+    "cloud_provider": {
+      "type": "string",
+      "description": "Filter by cloud provider, e.g. 自建IDC, 阿里云, 腾讯云, 华为云, AWS."
+    },
+    "owner": {
+      "type": "string",
+      "description": "Filter by owner/team substring."
+    },
+    "criticality": {
+      "type": "string",
+      "description": "Filter by operator-defined criticality, e.g. 核心, 高, 中, 低, critical."
+    },
     "limit": {
       "type": "integer",
       "minimum": 1,
@@ -67,6 +95,13 @@ type QueryEdgesArgs struct {
 	Status                string `json:"status,omitempty"`
 	LastSeenWithinMinutes int    `json:"last_seen_within_minutes,omitempty"`
 	NameContains          string `json:"name_contains,omitempty"`
+	BusinessSystem        string `json:"business_system,omitempty"`
+	Environment           string `json:"environment,omitempty"`
+	Region                string `json:"region,omitempty"`
+	Datacenter            string `json:"datacenter,omitempty"`
+	CloudProvider         string `json:"cloud_provider,omitempty"`
+	Owner                 string `json:"owner,omitempty"`
+	Criticality           string `json:"criticality,omitempty"`
 	Limit                 int    `json:"limit,omitempty"`
 }
 
@@ -75,12 +110,13 @@ type QueryEdgesArgs struct {
 // Kept narrow on purpose: the LLM gets only the columns it can reason
 // over without leaking secret_key_hash / access_key_id.
 type EdgeRow struct {
-	ID         uint64     `json:"device_id"`
-	Name       string     `json:"name"`
-	Hostname   string     `json:"hostname,omitempty"`
-	Online     bool       `json:"online"`
-	Roles      []string   `json:"roles"`
-	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	ID           uint64        `json:"device_id"`
+	Name         string        `json:"name"`
+	Hostname     string        `json:"hostname,omitempty"`
+	Online       bool          `json:"online"`
+	Roles        []string      `json:"roles"`
+	LastSeenAt   *time.Time    `json:"last_seen_at,omitempty"`
+	AssetProfile *AssetProfile `json:"asset_profile,omitempty"`
 }
 
 // queryEdgesCallTimeout caps the biz call.
@@ -110,8 +146,15 @@ func (r *Registry) executeQueryEdges(ctx context.Context, args json.RawMessage) 
 	// (older test fixtures).
 	if r.devices != nil {
 		f := devicebiz.ListFilter{
-			Name:  in.NameContains,
-			Limit: in.Limit,
+			Name:           in.NameContains,
+			BusinessSystem: in.BusinessSystem,
+			Environment:    in.Environment,
+			Region:         in.Region,
+			Datacenter:     in.Datacenter,
+			CloudProvider:  in.CloudProvider,
+			Owner:          in.Owner,
+			Criticality:    in.Criticality,
+			Limit:          in.Limit,
 		}
 		switch in.Status {
 		case "":
@@ -155,12 +198,13 @@ func (r *Registry) executeQueryEdges(ctx context.Context, args json.RawMessage) 
 				continue
 			}
 			rows = append(rows, EdgeRow{
-				ID:         d.ID,
-				Name:       d.Name,
-				Hostname:   d.Hostname,
-				Online:     d.Online,
-				Roles:      devicemodel.DecodeRoles(d.Roles),
-				LastSeenAt: d.LastSeenAt,
+				ID:           d.ID,
+				Name:         d.Name,
+				Hostname:     d.Hostname,
+				Online:       d.Online,
+				Roles:        devicemodel.DecodeRoles(d.Roles),
+				LastSeenAt:   d.LastSeenAt,
+				AssetProfile: assetProfileFromDevice(d),
 			})
 			if len(rows) >= in.Limit {
 				break

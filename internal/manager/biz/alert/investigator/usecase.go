@@ -19,6 +19,7 @@ package investigator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -27,8 +28,10 @@ import (
 	"time"
 
 	chatruntime "github.com/ongridio/ongrid/internal/manager/biz/aiops/chatruntime"
+	bizapproval "github.com/ongridio/ongrid/internal/manager/biz/approval"
 	aiopsmodel "github.com/ongridio/ongrid/internal/manager/model/aiops"
 	alertmodel "github.com/ongridio/ongrid/internal/manager/model/alert"
+	approvalmodel "github.com/ongridio/ongrid/internal/manager/model/approval"
 )
 
 // Repo is the persistence contract — implemented by
@@ -170,6 +173,9 @@ type Usecase struct {
 	messages   MessageReader
 	cfg        Config
 	log        *slog.Logger
+	approvals  interface {
+		Propose(context.Context, bizapproval.ProposeInput) (*approvalmodel.Approval, error)
+	}
 
 	// inflightMu + inflight guards the in-process "currently running"
 	// set so a burst of identical fires within one tick of the
@@ -246,6 +252,13 @@ func (uc *Usecase) WithRelatedQuerier(q RelatedAlertQuerier) *Usecase {
 // see MessageReader doc + the "exceeds max steps" handler in run().
 func (uc *Usecase) WithMessageReader(m MessageReader) *Usecase {
 	uc.messages = m
+	return uc
+}
+
+func (uc *Usecase) WithApprovalSink(a interface {
+	Propose(context.Context, bizapproval.ProposeInput) (*approvalmodel.Approval, error)
+}) *Usecase {
+	uc.approvals = a
 	return uc
 }
 
@@ -658,12 +671,61 @@ func (uc *Usecase) run(reportID string, incident alertmodel.Incident, dedupKeyVa
 			slog.String("report_id", reportID), slog.Any("err", err))
 		return
 	}
+	uc.proposeRiskyActions(context.Background(), &incident, reportID, worker.SessionID, fields.SuggestedActionsJSON)
 
 	uc.log.Info("investigation finished",
 		slog.String("report_id", reportID),
 		slog.Uint64("incident_id", incident.ID),
 		slog.Duration("elapsed", time.Since(start)),
 		slog.String("root_cause", fields.RootCause))
+}
+
+func (uc *Usecase) proposeRiskyActions(ctx context.Context, incident *alertmodel.Incident, reportID, sessionID, raw string) {
+	if uc.approvals == nil || incident == nil {
+		return
+	}
+	var actions []map[string]any
+	if json.Unmarshal([]byte(raw), &actions) != nil {
+		return
+	}
+	for _, action := range actions {
+		risk := strings.ToLower(stringValue(action["risk_level"], action["danger"]))
+		if risk != "high" {
+			continue
+		}
+		label := stringValue(action["label"])
+		if label == "" {
+			label = "RCA 高风险建议动作"
+		}
+		actionType := strings.ToLower(stringValue(action["action_type"]))
+		if actionType != "skill" && actionType != "workflow" {
+			actionType = "manual"
+		}
+		payload := map[string]any{
+			"incident_id": incident.ID, "investigation_id": reportID,
+			"action_type": actionType, "action": action,
+		}
+		_, err := uc.approvals.Propose(ctx, bizapproval.ProposeInput{
+			Kind: "suggested_action", Title: label, Summary: label, Payload: payload,
+			Source: approvalmodel.SourceRCA, SessionID: sessionID,
+			IncidentID: incident.ID, SourceType: approvalmodel.SourceRCA,
+			RiskLevel: risk, ActionType: actionType,
+			Recommendation: stringValue(action["reason"], action["recommendation"], action["label"]),
+			Prerequisites:  action["prerequisites"],
+		})
+		if err != nil {
+			uc.log.Warn("propose RCA suggested action", slog.Uint64("incident_id", incident.ID), slog.Any("err", err))
+		}
+	}
+}
+
+func stringValue(values ...any) string {
+	for _, value := range values {
+		if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
 }
 
 // renderAlertPrompt produces the initial user message for the

@@ -252,6 +252,65 @@ func (u *Usecase) GenerateNow(ctx context.Context, createdBy uint64, kind, tz, s
 	return rpt, nil
 }
 
+// ArchiveReady creates a ready report from already-produced content, such as
+// an RCA investigation markdown or a security patrol result. It deliberately
+// bypasses the reporter worker: the caller is archiving evidence that already
+// exists in another Ongrid workflow.
+func (u *Usecase) ArchiveReady(ctx context.Context, createdBy uint64, title, kind, tz, scopeJSON, contentMD, summary, locale, taskRef string, now time.Time) (*model.Report, error) {
+	if title == "" {
+		return nil, fmt.Errorf("%w: title required", errs.ErrInvalid)
+	}
+	if contentMD == "" {
+		return nil, fmt.Errorf("%w: content_md required", errs.ErrInvalid)
+	}
+	if kind == "" {
+		kind = model.KindCustom
+	}
+	if tz == "" {
+		tz = "UTC"
+	}
+	if scopeJSON == "" {
+		scopeJSON = "{}"
+	}
+	if locale == "" {
+		locale = u.defaultLocale
+	}
+	loc, err := loadLocation(tz)
+	if err != nil {
+		return nil, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	localNow := now.In(loc)
+	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, loc).UTC()
+	end := localNow.UTC()
+	rpt := &model.Report{
+		ID:          u.idGen(),
+		ScheduleID:  nil,
+		TaskID:      taskRef,
+		RunID:       u.idGen(),
+		CreatedBy:   createdBy,
+		Title:       title,
+		Kind:        kind,
+		PeriodStart: start,
+		PeriodEnd:   end,
+		Timezone:    tz,
+		Locale:      locale,
+		ScopeJSON:   scopeJSON,
+		Status:      model.StatusReady,
+		ErrorMsg:    "",
+		ContentJSON: "",
+		ContentMD:   contentMD,
+		SummaryText: summary,
+		GeneratedAt: &now,
+	}
+	if err := u.repo.CreateReport(ctx, rpt); err != nil {
+		return nil, err
+	}
+	return rpt, nil
+}
+
 // buildPendingReport assembles the pending row for a scheduled fire.
 func (u *Usecase) buildPendingReport(s *model.ReportSchedule, p Period) *model.Report {
 	id := s.ID

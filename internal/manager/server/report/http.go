@@ -18,8 +18,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	bizaudit "github.com/ongridio/ongrid/internal/manager/biz/audit"
 	bizreport "github.com/ongridio/ongrid/internal/manager/biz/report"
+	auditmodel "github.com/ongridio/ongrid/internal/manager/model/audit"
 	model "github.com/ongridio/ongrid/internal/manager/model/report"
+	auditmw "github.com/ongridio/ongrid/internal/manager/server/middleware"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
 )
@@ -41,6 +44,7 @@ func NewHandler(uc *bizreport.Usecase) *Handler {
 //
 //	GET    /v1/reports                       list
 //	POST   /v1/reports                       manual generate            (writer)
+//	POST   /v1/reports/archive               archive ready markdown      (writer)
 //	GET    /v1/reports/{id}                  detail
 //	DELETE /v1/reports/{id}                  delete                     (writer)
 //	POST   /v1/reports/{id}/share            mint share token           (writer)
@@ -54,6 +58,7 @@ func NewHandler(uc *bizreport.Usecase) *Handler {
 func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/reports", h.listReports)
 	r.With(h.requireWriter).Post("/v1/reports", h.generateNow)
+	r.With(h.requireWriter).Post("/v1/reports/archive", h.archiveReport)
 	r.Get("/v1/reports/{id}", h.getReport)
 	r.With(h.requireWriter).Delete("/v1/reports/{id}", h.deleteReport)
 	r.With(h.requireWriter).Post("/v1/reports/{id}/share", h.shareReport)
@@ -192,12 +197,74 @@ func (h *Handler) generateNow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, toReportDetail(rpt))
 }
 
-func (h *Handler) shareReport(w http.ResponseWriter, r *http.Request) {
-	token, err := h.uc.ShareReport(r.Context(), chi.URLParam(r, "id"), h.now())
+type archiveReportReq struct {
+	Title     string `json:"title"`
+	Kind      string `json:"kind"`
+	Timezone  string `json:"timezone"`
+	ScopeJSON string `json:"scope_json"`
+	ContentMD string `json:"content_md"`
+	Summary   string `json:"summary"`
+	TaskID    string `json:"task_id"`
+}
+
+func (h *Handler) archiveReport(w http.ResponseWriter, r *http.Request) {
+	t, ok := tenantctx.From(r.Context())
+	if !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	var req archiveReportReq
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&req); err != nil {
+		writeErr(w, errors.Join(errs.ErrInvalid, err))
+		return
+	}
+	rpt, err := h.uc.ArchiveReady(
+		r.Context(),
+		t.UserID,
+		strings.TrimSpace(req.Title),
+		firstNonEmpty(strings.TrimSpace(req.Kind), model.KindCustom),
+		firstNonEmpty(strings.TrimSpace(req.Timezone), "UTC"),
+		firstNonEmpty(strings.TrimSpace(req.ScopeJSON), "{}"),
+		req.ContentMD,
+		strings.TrimSpace(req.Summary),
+		localeFromRequest(r),
+		strings.TrimSpace(req.TaskID),
+		h.now(),
+	)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
+	auditmw.SetAuditEvent(r, bizaudit.Event{
+		Action:       auditmodel.ActionReportArchive,
+		ResourceType: auditmodel.ResourceReport,
+		ResourceID:   rpt.ID,
+		ResourceName: rpt.Title,
+		Payload: map[string]any{
+			"kind":       rpt.Kind,
+			"task_id":    rpt.TaskID,
+			"scope_json": rpt.ScopeJSON,
+		},
+	})
+	writeJSON(w, http.StatusCreated, toReportDetail(rpt))
+}
+
+func (h *Handler) shareReport(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	token, err := h.uc.ShareReport(r.Context(), id, h.now())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	auditmw.SetAuditEvent(r, bizaudit.Event{
+		Action:       auditmodel.ActionReportExport,
+		ResourceType: auditmodel.ResourceReport,
+		ResourceID:   id,
+		ResourceName: id,
+		Payload: map[string]any{
+			"export_type": "share_link",
+		},
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"share_token": token, "path": "/r/" + token})
 }
 

@@ -12,6 +12,12 @@ export interface Approval {
   payload: string;
   source: string;
   session_id?: string;
+  incident_id?: number;
+  source_type: 'incident' | 'rca' | 'workflow' | 'skill' | 'agent' | string;
+  risk_level: 'high' | 'medium' | 'low' | 'none' | string;
+  action_type: 'skill' | 'workflow' | 'manual' | string;
+  recommendation?: string;
+  prerequisites: string;
   status: 'pending' | 'approved' | 'rejected' | 'executed' | 'failed';
   proposed_by: number;
   approved_by?: number;

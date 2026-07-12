@@ -34,6 +34,8 @@
 set -uo pipefail
 
 STAGE_DIR=/var/lib/ongrid-edge/.upgrade
+STATE_DIR=/var/lib/ongrid-edge
+LOG_DIR=/var/log/ongrid-edge
 INCOMING_DIR=$STAGE_DIR/incoming
 MANIFEST=$INCOMING_DIR/MANIFEST.txt
 LAST_UPGRADE_AT=$STAGE_DIR/last_upgrade_at
@@ -69,6 +71,25 @@ ensure_log_groups() {
   done
 }
 ensure_log_groups
+
+# ----- Pre-start: ensure sandbox writable paths exist -----------------------
+#
+# ongrid-edge.service uses ProtectSystem=strict + ReadWritePaths for
+# /var/lib/ongrid-edge and /var/log/ongrid-edge. systemd validates those paths
+# while constructing the mount namespace, before ExecStart runs. If an install
+# or cleanup leaves /var/log/ongrid-edge missing, the agent never starts and
+# fails with status=226/NAMESPACE. This root oneshot is ordered
+# Before=ongrid-edge.service, so make the paths real on every start.
+ensure_sandbox_paths() {
+  mkdir -p "$STATE_DIR" "$LOG_DIR" "$STAGE_DIR" 2>/dev/null || true
+  if id ongrid-edge >/dev/null 2>&1; then
+    chown ongrid-edge:ongrid-edge "$STATE_DIR" "$LOG_DIR" 2>/dev/null || true
+    chown -R ongrid-edge:ongrid-edge "$STAGE_DIR" 2>/dev/null || true
+  fi
+  chmod 0755 "$STATE_DIR" 2>/dev/null || true
+  chmod 0750 "$LOG_DIR" "$STAGE_DIR" 2>/dev/null || true
+}
+ensure_sandbox_paths
 
 # ----- Mode 1: auto-rollback ------------------------------------------------
 #

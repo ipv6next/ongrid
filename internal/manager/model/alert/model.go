@@ -40,6 +40,10 @@ const (
 	// is "system"; the IncidentDetail SPA renders this row prominently
 	// at the top so on-call sees AI's first take without opening /chat.
 	EventTypeAIInitialDiagnosis = "ai_initial_diagnosis"
+	EventTypeApprovalApproved   = "approval_approved"
+	EventTypeApprovalRejected   = "approval_rejected"
+	EventTypeActionExecuted     = "action_executed"
+	EventTypeActionFailed       = "action_failed"
 )
 
 const (
@@ -51,6 +55,9 @@ const (
 const (
 	RuleSourceBuiltin           = "ongrid_builtin"
 	RuleSourcePrometheus        = "prometheus_external"
+	RuleSourceAlertmanager      = "alertmanager_external"
+	RuleSourceManual            = "manual_report"
+	RuleSourcePatrolRisk        = "patrol_risk"
 	RuleJoinModeAll             = "all"
 	RuleJoinModeAny             = "any"
 	RuleScopeHost               = "host"
@@ -207,8 +214,8 @@ const (
 )
 
 type Incident struct {
-	ID              uint64         `gorm:"column:id;primaryKey;autoIncrement"`
-	RuleID          *uint64        `gorm:"column:rule_id;index:idx_alert_incidents_rule_id"`
+	ID     uint64  `gorm:"column:id;primaryKey;autoIncrement"`
+	RuleID *uint64 `gorm:"column:rule_id;index:idx_alert_incidents_rule_id"`
 	// DeviceID is the host device this incident fired against. Renamed
 	// from EdgeID in May 2026 (entity split); the underlying integer
 	// matches the legacy edge_id 1:1 because the migration reuses it.
@@ -267,10 +274,10 @@ type Event struct {
 func (Event) TableName() string { return "alert_events" }
 
 type Silence struct {
-	ID           uint64         `gorm:"column:id;primaryKey;autoIncrement"`
-	Name         string         `gorm:"column:name;size:128;not null;default:''"`
-	Scope        string         `gorm:"column:scope;size:32;not null;default:''"`
-	ScopeType    string         `gorm:"column:scope_type;size:32;not null;default:''"`
+	ID        uint64 `gorm:"column:id;primaryKey;autoIncrement"`
+	Name      string `gorm:"column:name;size:128;not null;default:''"`
+	Scope     string `gorm:"column:scope;size:32;not null;default:''"`
+	ScopeType string `gorm:"column:scope_type;size:32;not null;default:''"`
 	// DeviceID renamed from EdgeID in May 2026 (entity split).
 	DeviceID     *uint64        `gorm:"column:device_id;index:idx_alert_silences_device_rule,priority:1"`
 	Rule         string         `gorm:"column:rule;size:128;not null;default:'';index:idx_alert_silences_device_rule,priority:2"`
@@ -299,24 +306,24 @@ type Rule struct {
 	// runs. Defaults to "metric_raw" — the canonical post-Phase-3-final
 	// shape; data/alert/store.Migrate also backfills legacy NULL/'' rows
 	// to metric_raw and rewrites any lingering metric_threshold rows.
-	Kind            string         `gorm:"column:kind;size:32;not null;default:'metric_raw';index:idx_alert_rules_kind"`
-	Name            string         `gorm:"column:name;size:128;not null;default:''"`
-	SourceType      string         `gorm:"column:source_type;size:32;not null;default:'';index:idx_alert_rules_scope_enabled,priority:1"`
-	ScopeType       string         `gorm:"column:scope_type;size:32;not null;default:'';index:idx_alert_rules_scope_enabled,priority:2"`
-	JoinMode        string         `gorm:"column:join_mode;size:8;not null;default:all"`
-	Severity        string         `gorm:"column:severity;size:16;not null;default:''"`
-	Enabled         bool           `gorm:"column:enabled;not null;default:true;index:idx_alert_rules_scope_enabled,priority:3"`
-	ConditionsJSON  string         `gorm:"column:conditions_json;type:text;not null"`
-	LabelsJSON      *string        `gorm:"column:labels_json;type:text"`
-	AnnotationsJSON *string        `gorm:"column:annotations_json;type:text"`
-	RunbookURL      *string        `gorm:"column:runbook_url;size:512"`
+	Kind            string  `gorm:"column:kind;size:32;not null;default:'metric_raw';index:idx_alert_rules_kind"`
+	Name            string  `gorm:"column:name;size:128;not null;default:''"`
+	SourceType      string  `gorm:"column:source_type;size:32;not null;default:'';index:idx_alert_rules_scope_enabled,priority:1"`
+	ScopeType       string  `gorm:"column:scope_type;size:32;not null;default:'';index:idx_alert_rules_scope_enabled,priority:2"`
+	JoinMode        string  `gorm:"column:join_mode;size:8;not null;default:all"`
+	Severity        string  `gorm:"column:severity;size:16;not null;default:''"`
+	Enabled         bool    `gorm:"column:enabled;not null;default:true;index:idx_alert_rules_scope_enabled,priority:3"`
+	ConditionsJSON  string  `gorm:"column:conditions_json;type:text;not null"`
+	LabelsJSON      *string `gorm:"column:labels_json;type:text"`
+	AnnotationsJSON *string `gorm:"column:annotations_json;type:text"`
+	RunbookURL      *string `gorm:"column:runbook_url;size:512"`
 	// NotifyChannelIDsJSON optionally pins this rule's incidents to a
 	// specific subset of notification channels (JSON-encoded []uint64).
 	// nil / empty → router falls back to the global severity/scope
 	// filters on each channel (legacy behavior). Non-empty → only those
 	// channel IDs receive the incident (still subject to each channel's
 	// own enabled flag for safety).
-	NotifyChannelIDsJSON *string        `gorm:"column:notify_channel_ids_json;type:text"`
+	NotifyChannelIDsJSON *string `gorm:"column:notify_channel_ids_json;type:text"`
 	// NotifyWindowSeconds + NotifyMinFires together implement the per-rule
 	// 「发送策略」(send-policy) dampening gate: a rule that fires fewer than
 	// NotifyMinFires times within the trailing NotifyWindowSeconds does NOT
@@ -327,12 +334,12 @@ type Rule struct {
 	// disabled, every firing notifies subject to the existing cooldown +
 	// silence + inhibition gates. Both > 0 → dampening enabled.
 	// Mixed (one zero, one >0) is rejected at the biz layer.
-	NotifyWindowSeconds  int            `gorm:"column:notify_window_seconds;not null;default:0"`
-	NotifyMinFires       int            `gorm:"column:notify_min_fires;not null;default:0"`
-	CreatedBy            *uint64        `gorm:"column:created_by"`
-	CreatedAt       time.Time      `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt       time.Time      `gorm:"column:updated_at;autoUpdateTime"`
-	DeletedAt       gorm.DeletedAt `gorm:"column:deleted_at;index"`
+	NotifyWindowSeconds int            `gorm:"column:notify_window_seconds;not null;default:0"`
+	NotifyMinFires      int            `gorm:"column:notify_min_fires;not null;default:0"`
+	CreatedBy           *uint64        `gorm:"column:created_by"`
+	CreatedAt           time.Time      `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt           time.Time      `gorm:"column:updated_at;autoUpdateTime"`
+	DeletedAt           gorm.DeletedAt `gorm:"column:deleted_at;index"`
 }
 
 func (Rule) TableName() string { return "alert_rules" }

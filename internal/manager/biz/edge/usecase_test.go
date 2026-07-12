@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -153,6 +154,24 @@ func (d *fakeDeviceRepo) UpdateNameDescription(_ context.Context, id uint64, nam
 		return errs.ErrNotFound
 	}
 	dev.Name, dev.Description = name, description
+	return nil
+}
+
+func (d *fakeDeviceRepo) UpdateProfile(_ context.Context, id uint64, profile devicebiz.Profile) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	dev, ok := d.byID[id]
+	if !ok {
+		return errs.ErrNotFound
+	}
+	dev.Name = profile.Name
+	dev.Description = profile.Description
+	dev.BusinessSystem = profile.BusinessSystem
+	dev.Environment = profile.Environment
+	dev.Owner = profile.Owner
+	dev.Criticality = profile.Criticality
+	dev.SecurityLevel = profile.SecurityLevel
+	dev.Tags = strings.Join(profile.Tags, ",")
 	return nil
 }
 

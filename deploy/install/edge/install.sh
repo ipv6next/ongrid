@@ -440,6 +440,13 @@ else
     log_error "  fix: mkdir -p ${STATE_DIR}; chown ${SERVICE_USER}:${SERVICE_GROUP} ${STATE_DIR}; chmod 0755 ${STATE_DIR}; systemctl restart ongrid-edge"
     SELFCHECK_FAIL=1
 fi
+if [[ -d "$LOG_DIR" ]]; then
+    log_ok "log dir present for systemd sandbox: ${LOG_DIR}"
+else
+    log_error "log dir missing: ${LOG_DIR} — on systems enforcing ReadWritePaths, ongrid-edge may fail with status=226/NAMESPACE"
+    log_error "  fix: mkdir -p ${LOG_DIR}; chown ${SERVICE_USER}:${SERVICE_GROUP} ${LOG_DIR}; chmod 750 ${LOG_DIR}; systemctl restart ongrid-edge"
+    SELFCHECK_FAIL=1
+fi
 if command -v runuser >/dev/null 2>&1; then
     JREAD=(runuser -u "$SERVICE_USER" -- journalctl -n 1 --no-pager)
 else
@@ -453,10 +460,14 @@ else
     SELFCHECK_FAIL=1
 fi
 DP_HOST="${SERVER_HTTP_ADDR%%:*}"
-if [[ -n "$DP_HOST" ]] && timeout 5 bash -c "exec 3<>/dev/tcp/${DP_HOST}/443" 2>/dev/null; then
-    log_ok "data-plane host ${DP_HOST}:443 reachable (TCP)"
+DP_PORT="${SERVER_HTTP_ADDR##*:}"
+if [[ "$DP_PORT" == "$SERVER_HTTP_ADDR" || -z "$DP_PORT" ]]; then
+    DP_PORT=443
+fi
+if [[ -n "$DP_HOST" ]] && timeout 5 bash -c "exec 3<>/dev/tcp/${DP_HOST}/${DP_PORT}" 2>/dev/null; then
+    log_ok "data-plane host ${DP_HOST}:${DP_PORT} reachable (TCP)"
 else
-    log_warn "data-plane host ${DP_HOST}:443 not reachable from here — logs/traces push may fail"
+    log_warn "data-plane host ${DP_HOST}:${DP_PORT} not reachable from here — logs/traces push may fail"
 fi
 if [[ $SELFCHECK_FAIL -eq 0 ]]; then
     log_ok "self-check passed"

@@ -10,6 +10,10 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	bizapproval "github.com/ongridio/ongrid/internal/manager/biz/approval"
+	bizaudit "github.com/ongridio/ongrid/internal/manager/biz/audit"
+	approvalmodel "github.com/ongridio/ongrid/internal/manager/model/approval"
+	auditmodel "github.com/ongridio/ongrid/internal/manager/model/audit"
+	auditmw "github.com/ongridio/ongrid/internal/manager/server/middleware"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
 )
@@ -71,11 +75,30 @@ func (h *Handler) approve(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	a, err := h.uc.Approve(r.Context(), c.UserID, chi.URLParam(r, "id"))
+	id := chi.URLParam(r, "id")
+	before, _ := h.uc.Get(r.Context(), id)
+	a, err := h.uc.Approve(r.Context(), c.UserID, id)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
+	auditmw.SetAuditEvent(r, bizaudit.Event{
+		Action:       auditmodel.ActionApprovalApprove,
+		ResourceType: auditmodel.ResourceApproval,
+		ResourceID:   id,
+		ResourceName: firstNonEmpty(a.Title, titleOf(before), id),
+		Payload: map[string]any{
+			"kind":        firstNonEmpty(a.Kind, kindOf(before)),
+			"source":      firstNonEmpty(a.Source, sourceOf(before)),
+			"session_id":  firstNonEmpty(a.SessionID, sessionOf(before)),
+			"status":      a.Status,
+			"incident_id": a.IncidentID,
+			"source_type": a.SourceType,
+			"risk_level":  a.RiskLevel,
+			"action_type": a.ActionType,
+			"result":      a.ResultJSON,
+		},
+	})
 	writeJSON(w, http.StatusOK, a)
 }
 
@@ -88,10 +111,28 @@ func (h *Handler) reject(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&in)
-	if err := h.uc.Reject(r.Context(), c.UserID, chi.URLParam(r, "id"), in.Reason); err != nil {
+	id := chi.URLParam(r, "id")
+	before, _ := h.uc.Get(r.Context(), id)
+	if err := h.uc.Reject(r.Context(), c.UserID, id, in.Reason); err != nil {
 		writeErr(w, err)
 		return
 	}
+	auditmw.SetAuditEvent(r, bizaudit.Event{
+		Action:       auditmodel.ActionApprovalReject,
+		ResourceType: auditmodel.ResourceApproval,
+		ResourceID:   id,
+		ResourceName: firstNonEmpty(titleOf(before), id),
+		Payload: map[string]any{
+			"kind":        kindOf(before),
+			"source":      sourceOf(before),
+			"session_id":  sessionOf(before),
+			"reason":      in.Reason,
+			"incident_id": incidentOf(before),
+			"source_type": sourceTypeOf(before),
+			"risk_level":  riskOf(before),
+			"action_type": actionTypeOf(before),
+		},
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -113,6 +154,71 @@ func requireAdmin(w http.ResponseWriter, r *http.Request) (caller, bool) {
 		return caller{}, false
 	}
 	return caller{UserID: t.UserID, Role: t.Role}, true
+}
+
+func titleOf(a *approvalmodel.Approval) string {
+	if a == nil {
+		return ""
+	}
+	return a.Title
+}
+
+func kindOf(a *approvalmodel.Approval) string {
+	if a == nil {
+		return ""
+	}
+	return a.Kind
+}
+
+func sourceOf(a *approvalmodel.Approval) string {
+	if a == nil {
+		return ""
+	}
+	return a.Source
+}
+
+func sessionOf(a *approvalmodel.Approval) string {
+	if a == nil {
+		return ""
+	}
+	return a.SessionID
+}
+
+func incidentOf(a *approvalmodel.Approval) uint64 {
+	if a == nil {
+		return 0
+	}
+	return a.IncidentID
+}
+
+func sourceTypeOf(a *approvalmodel.Approval) string {
+	if a == nil {
+		return ""
+	}
+	return a.SourceType
+}
+
+func riskOf(a *approvalmodel.Approval) string {
+	if a == nil {
+		return ""
+	}
+	return a.RiskLevel
+}
+
+func actionTypeOf(a *approvalmodel.Approval) string {
+	if a == nil {
+		return ""
+	}
+	return a.ActionType
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 type errorBody struct {

@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	biz "github.com/ongridio/ongrid/internal/manager/biz/device"
 	model "github.com/ongridio/ongrid/internal/manager/model/device"
 	edgemodel "github.com/ongridio/ongrid/internal/manager/model/edge"
 )
@@ -71,6 +72,89 @@ func TestFindOrCreateByFingerprintSoftDeleteAllowsReuse(t *testing.T) {
 	}
 	if n, err := repo.Count(ctx); err != nil || n != 1 {
 		t.Fatalf("Count after recreate = %d, %v; want 1,nil", n, err)
+	}
+}
+
+func TestUpdateProfilePersistsAssetMetadata(t *testing.T) {
+	db := newDeviceTestDB(t)
+	repo := NewRepo(db)
+	ctx := context.Background()
+
+	dev, err := repo.FindOrCreateByFingerprint(ctx, sampleDevice("asset-a"))
+	if err != nil {
+		t.Fatalf("FindOrCreateByFingerprint: %v", err)
+	}
+	if err := repo.UpdateProfile(ctx, dev.ID, biz.Profile{
+		Name:           "pay-prod-01",
+		Description:    "payment api host",
+		BusinessSystem: "Payment",
+		Environment:    "生产",
+		Owner:          "secops",
+		Criticality:    "核心",
+		SecurityLevel:  "等保三级",
+		Tags:           []string{"internet-facing", "database"},
+	}); err != nil {
+		t.Fatalf("UpdateProfile: %v", err)
+	}
+
+	got, err := repo.Get(ctx, dev.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Name != "pay-prod-01" ||
+		got.BusinessSystem != "Payment" ||
+		got.Environment != "生产" ||
+		got.Owner != "secops" ||
+		got.Criticality != "核心" ||
+		got.SecurityLevel != "等保三级" ||
+		got.Tags != "internet-facing,database" {
+		t.Fatalf("profile not persisted: %#v", got)
+	}
+}
+
+func TestListFiltersAssetMetadata(t *testing.T) {
+	db := newDeviceTestDB(t)
+	repo := NewRepo(db)
+	ctx := context.Background()
+
+	pay, err := repo.FindOrCreateByFingerprint(ctx, sampleDevice("pay-prod-01"))
+	if err != nil {
+		t.Fatalf("create pay: %v", err)
+	}
+	if err := repo.UpdateProfile(ctx, pay.ID, biz.Profile{
+		Name:           "pay-prod-01",
+		BusinessSystem: "Payment",
+		Environment:    "生产",
+		Owner:          "secops",
+		Criticality:    "核心",
+	}); err != nil {
+		t.Fatalf("profile pay: %v", err)
+	}
+	oa, err := repo.FindOrCreateByFingerprint(ctx, sampleDevice("oa-test-01"))
+	if err != nil {
+		t.Fatalf("create oa: %v", err)
+	}
+	if err := repo.UpdateProfile(ctx, oa.ID, biz.Profile{
+		Name:           "oa-test-01",
+		BusinessSystem: "OA",
+		Environment:    "测试",
+		Owner:          "it",
+		Criticality:    "低",
+	}); err != nil {
+		t.Fatalf("profile oa: %v", err)
+	}
+
+	rows, err := repo.List(ctx, biz.ListFilter{
+		BusinessSystem: "Pay",
+		Environment:    "生产",
+		Criticality:    "核心",
+		Limit:          10,
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != pay.ID {
+		t.Fatalf("rows = %+v, want only pay", rows)
 	}
 }
 

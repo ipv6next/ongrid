@@ -45,6 +45,35 @@ func TestDefaultReadOnly_ClassCounts(t *testing.T) {
 	t.Logf("class counts: %+v (total=%d)", counts, len(p.bins))
 }
 
+func TestEnableDockerReadOnly(t *testing.T) {
+	p := EnableDockerReadOnly(DefaultReadOnly())
+	p.Lookup("docker").AbsPath = "/usr/bin/docker"
+	for _, cmd := range []string{
+		"docker ps -a",
+		"docker inspect web",
+		"docker logs --tail 100 web",
+		"docker stats --no-stream",
+		"docker network inspect bridge",
+		"docker compose ps -a",
+		"docker compose logs --tail 100 api",
+	} {
+		if d := p.Decide(cmd); !d.Allow {
+			t.Errorf("%q should be allowed: %s", cmd, d.Reason)
+		}
+	}
+	for _, cmd := range []string{
+		"docker restart web",
+		"docker exec web sh",
+		"docker rm web",
+		"docker compose up -d",
+		"docker network create prod",
+	} {
+		if d := p.Decide(cmd); d.Allow {
+			t.Errorf("%q should be denied", cmd)
+		}
+	}
+}
+
 func TestDecide_DeniedBinaries(t *testing.T) {
 	p := DefaultReadOnly()
 	for _, cmd := range []string{

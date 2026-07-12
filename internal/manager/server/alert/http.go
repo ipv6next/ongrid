@@ -2,6 +2,7 @@ package alert
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,12 +13,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	bizaudit "github.com/ongridio/ongrid/internal/manager/biz/audit"
 	"github.com/ongridio/ongrid/internal/manager/biz/alert/investigator"
+	bizaudit "github.com/ongridio/ongrid/internal/manager/biz/audit"
+	aiopsmodel "github.com/ongridio/ongrid/internal/manager/model/aiops"
 	alertmodel "github.com/ongridio/ongrid/internal/manager/model/alert"
 	auditmodel "github.com/ongridio/ongrid/internal/manager/model/audit"
-	svc "github.com/ongridio/ongrid/internal/manager/service/alert"
 	auditmw "github.com/ongridio/ongrid/internal/manager/server/middleware"
+	svc "github.com/ongridio/ongrid/internal/manager/service/alert"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tenantctx"
 )
@@ -26,6 +28,7 @@ type IncidentService interface {
 	ListIncidents(ctx context.Context, caller svc.Caller, in svc.IncidentFilter) ([]*svc.Incident, error)
 	CountIncidents(ctx context.Context, caller svc.Caller, in svc.IncidentFilter) (int64, error)
 	GetIncident(ctx context.Context, caller svc.Caller, id uint64) (*svc.Incident, error)
+	IngestAlertmanager(ctx context.Context, caller svc.Caller, in svc.AlertmanagerWebhook) (*svc.AlertmanagerIngestResult, error)
 	AcknowledgeIncident(ctx context.Context, caller svc.Caller, id uint64, in svc.IncidentMutationInput) (*svc.Incident, error)
 	ResolveIncident(ctx context.Context, caller svc.Caller, id uint64, in svc.IncidentMutationInput) (*svc.Incident, error)
 	SilenceIncident(ctx context.Context, caller svc.Caller, id uint64, in svc.IncidentSilenceInput) (*svc.Incident, error)
@@ -63,6 +66,12 @@ type InvestigationReader interface {
 	GetByIncident(ctx context.Context, incidentID uint64) (*alertmodel.InvestigationReport, error)
 }
 
+// InvestigationTraceReader exposes raw tool-call evidence for the
+// investigation transcript referenced by investigation_reports.audit_session_id.
+type InvestigationTraceReader interface {
+	ListInvestigationToolCalls(ctx context.Context, sessionID string) ([]*aiopsmodel.ToolCall, error)
+}
+
 // InvestigationTrigger is the write-side seam — POST endpoint always
 // force-enqueues (kills any running worker on this incident, deletes
 // the prior report row, spawns fresh). Manual trigger semantics =
@@ -83,24 +92,45 @@ type InvestigationTrigger interface {
 // payloads so the SPA doesn't have to double-decode and so we don't
 // leak the storage representation.
 type InvestigationReport struct {
-	ID               string          `json:"id"`
-	IncidentID       uint64          `json:"incident_id"`
-	Status           string          `json:"status"`
-	StatusReason     string          `json:"status_reason,omitempty"`
-	RootCause        string          `json:"root_cause,omitempty"`
-	AffectedWindow   string          `json:"affected_window,omitempty"`
-	PinpointedTarget json.RawMessage `json:"pinpointed_target,omitempty"`
-	RelatedAlerts    json.RawMessage `json:"related_alerts,omitempty"`
-	Evidence         json.RawMessage `json:"evidence,omitempty"`
-	SuggestedActions json.RawMessage `json:"suggested_actions,omitempty"`
-	FindingsMD       string          `json:"findings_md,omitempty"`
-	Confidence       *float64        `json:"confidence,omitempty"`
+	ID                string          `json:"id"`
+	IncidentID        uint64          `json:"incident_id"`
+	Status            string          `json:"status"`
+	StatusReason      string          `json:"status_reason,omitempty"`
+	RootCause         string          `json:"root_cause,omitempty"`
+	AffectedWindow    string          `json:"affected_window,omitempty"`
+	PinpointedTarget  json.RawMessage `json:"pinpointed_target,omitempty"`
+	RelatedAlerts     json.RawMessage `json:"related_alerts,omitempty"`
+	Evidence          json.RawMessage `json:"evidence,omitempty"`
+	SuggestedActions  json.RawMessage `json:"suggested_actions,omitempty"`
+	FindingsMD        string          `json:"findings_md,omitempty"`
+	Confidence        *float64        `json:"confidence,omitempty"`
 	ConfidenceFactors json.RawMessage `json:"confidence_factors,omitempty"`
-	AuditSessionID   *string         `json:"audit_session_id,omitempty"`
-	WorkerID         *string         `json:"worker_id,omitempty"`
-	ToolCallCount    int             `json:"tool_call_count"`
-	CreatedAt        string          `json:"created_at"`
-	ReadyAt          *string         `json:"ready_at,omitempty"`
+	AuditSessionID    *string         `json:"audit_session_id,omitempty"`
+	WorkerID          *string         `json:"worker_id,omitempty"`
+	ToolCallCount     int             `json:"tool_call_count"`
+	CreatedAt         string          `json:"created_at"`
+	ReadyAt           *string         `json:"ready_at,omitempty"`
+}
+
+type InvestigationToolCall struct {
+	ID         string          `json:"id"`
+	LLMCallID  *string         `json:"llm_call_id,omitempty"`
+	MessageID  string          `json:"message_id"`
+	ToolName   string          `json:"tool_name"`
+	DeviceID   *uint64         `json:"device_id,omitempty"`
+	Status     string          `json:"status"`
+	Error      *string         `json:"error,omitempty"`
+	Arguments  json.RawMessage `json:"arguments,omitempty"`
+	Result     json.RawMessage `json:"result,omitempty"`
+	StartedAt  string          `json:"started_at"`
+	EndedAt    *string         `json:"ended_at,omitempty"`
+	DurationMS *int64          `json:"duration_ms,omitempty"`
+	CreatedAt  string          `json:"created_at"`
+}
+
+type listInvestigationToolCallsResp struct {
+	Items []InvestigationToolCall `json:"items"`
+	Total int                     `json:"total"`
 }
 
 type Handler struct {
@@ -109,13 +139,15 @@ type Handler struct {
 	rules                 RuleService
 	investigations        InvestigationReader
 	investigationsTrigger InvestigationTrigger
+	investigationTrace    InvestigationTraceReader
 	// runtime knobs exposed as informational metadata via
 	// GET /v1/alerts/runtime-info — kept on the handler so the SPA can
 	// surface "this rule evaluates every 5min" without the operator
 	// having to read the env. Default zero values yield 0 in the API,
 	// which the SPA treats as "unknown / not surfaced".
-	evaluatorInterval time.Duration
-	notifyCooldown    time.Duration
+	evaluatorInterval       time.Duration
+	notifyCooldown          time.Duration
+	alertmanagerPublicToken string
 }
 
 // NewHandler accepts the three services (or one combined Service satisfying
@@ -135,6 +167,11 @@ func (h *Handler) WithRuntime(evaluatorInterval, notifyCooldown time.Duration) *
 	return h
 }
 
+func (h *Handler) WithAlertmanagerPublicToken(token string) *Handler {
+	h.alertmanagerPublicToken = strings.TrimSpace(token)
+	return h
+}
+
 // WithInvestigations wires the read-only investigation reader used by
 // GET /v1/alerts/incidents/{id}/investigation. nil keeps the endpoint
 // returning 404 — which is the correct "feature off" UX for
@@ -151,11 +188,20 @@ func (h *Handler) WithInvestigationTrigger(t InvestigationTrigger) *Handler {
 	return h
 }
 
+// WithInvestigationTrace wires RCA transcript drill-down. nil keeps the
+// tool-call evidence endpoint returning feature_disabled.
+func (h *Handler) WithInvestigationTrace(r InvestigationTraceReader) *Handler {
+	h.investigationTrace = r
+	return h
+}
+
 func (h *Handler) Register(r chi.Router) {
 	r.Get("/v1/alerts/incidents", h.listIncidents)
 	r.Get("/v1/alerts/incidents/{id}", h.getIncident)
+	r.Post("/v1/alerts/external/alertmanager", h.ingestAlertmanager)
 	r.Get("/v1/alerts/incidents/{id}/events", h.listIncidentEvents)
 	r.Get("/v1/alerts/incidents/{id}/investigation", h.getIncidentInvestigation)
+	r.Get("/v1/alerts/incidents/{id}/investigation/tool-calls", h.listInvestigationToolCalls)
 	r.Post("/v1/alerts/incidents/{id}/investigation", h.triggerIncidentInvestigation)
 	r.Post("/v1/alerts/incidents/{id}/ack", h.ackIncident)
 	r.Post("/v1/alerts/incidents/{id}/resolve", h.resolveIncident)
@@ -178,6 +224,10 @@ func (h *Handler) Register(r chi.Router) {
 		r.Post("/v1/alert-rules/{id}/enabled", h.setRuleEnabled)
 		r.Delete("/v1/alert-rules/{id}", h.deleteRule)
 	}
+}
+
+func (h *Handler) RegisterPublic(r chi.Router) {
+	r.Post("/v1/integrations/alertmanager/webhook", h.ingestAlertmanagerPublic)
 }
 
 type listIncidentsResp struct {
@@ -206,15 +256,15 @@ type listRulesResp struct {
 }
 
 type ruleReq struct {
-	RuleKey    string              `json:"rule_key"`
-	Kind       string              `json:"kind,omitempty"`
-	Name       string              `json:"name"`
-	ScopeType  string              `json:"scope_type"`
-	JoinMode   string              `json:"join_mode"`
-	Severity   string              `json:"severity"`
-	Enabled    bool                `json:"enabled"`
-	Conditions []svc.RuleCondition `json:"conditions,omitempty"`
-	Spec       map[string]any      `json:"spec,omitempty"`
+	RuleKey          string              `json:"rule_key"`
+	Kind             string              `json:"kind,omitempty"`
+	Name             string              `json:"name"`
+	ScopeType        string              `json:"scope_type"`
+	JoinMode         string              `json:"join_mode"`
+	Severity         string              `json:"severity"`
+	Enabled          bool                `json:"enabled"`
+	Conditions       []svc.RuleCondition `json:"conditions,omitempty"`
+	Spec             map[string]any      `json:"spec,omitempty"`
 	Labels           map[string]string   `json:"labels,omitempty"`
 	RunbookURL       string              `json:"runbook_url,omitempty"`
 	NotifyChannelIDs []uint64            `json:"notify_channel_ids,omitempty"`
@@ -300,10 +350,73 @@ func (h *Handler) getIncident(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+func (h *Handler) ingestAlertmanager(w http.ResponseWriter, r *http.Request) {
+	caller, ok := callerFromRequest(r)
+	if !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	h.ingestAlertmanagerAs(w, r, caller)
+}
+
+func (h *Handler) ingestAlertmanagerPublic(w http.ResponseWriter, r *http.Request) {
+	if h.alertmanagerPublicToken == "" || !constantTimeTokenEqual(extractWebhookToken(r), h.alertmanagerPublicToken) {
+		writeErr(w, errs.ErrForbidden)
+		return
+	}
+	h.ingestAlertmanagerAs(w, r, svc.Caller{Role: "webhook"})
+}
+
+func (h *Handler) ingestAlertmanagerAs(w http.ResponseWriter, r *http.Request, caller svc.Caller) {
+	var req svc.AlertmanagerWebhook
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, errors.Join(errs.ErrInvalid, err))
+		return
+	}
+	out, err := h.incidents.IngestAlertmanager(r.Context(), caller, req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	auditmw.SetAuditEvent(r, bizaudit.Event{
+		Action:       "alertmanager_ingest",
+		ResourceType: auditmodel.ResourceIncident,
+		Status:       auditmodel.StatusSuccess,
+		Payload: map[string]any{
+			"accepted":      out.Accepted,
+			"created":       out.Created,
+			"reopened":      out.Reopened,
+			"resolved":      out.Resolved,
+			"asset_matched": out.AssetMatched,
+			"pending_link":  out.PendingLink,
+		},
+	})
+	writeJSON(w, http.StatusAccepted, out)
+}
+
+func extractWebhookToken(r *http.Request) string {
+	if tok := strings.TrimSpace(r.Header.Get("X-Ongrid-Webhook-Token")); tok != "" {
+		return tok
+	}
+	authz := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(authz), "bearer ") {
+		return strings.TrimSpace(authz[7:])
+	}
+	return strings.TrimSpace(r.URL.Query().Get("token"))
+}
+
+func constantTimeTokenEqual(got, want string) bool {
+	if got == "" || want == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 // getIncidentInvestigation returns the InvestigationReport bound to
 // the incident. 404 when:
 //   - investigator not wired (h.investigations == nil)
 //   - no report yet for this incident (errs.ErrNotFound from the repo)
+//
 // The SPA distinguishes the two cases by reading the response body —
 // nil-wired path returns {"status":"feature_disabled"} so the operator
 // sees a clear "投资分析未启用" badge instead of a misleading
@@ -407,6 +520,60 @@ func (h *Handler) triggerIncidentInvestigation(w http.ResponseWriter, r *http.Re
 	})
 }
 
+func (h *Handler) listInvestigationToolCalls(w http.ResponseWriter, r *http.Request) {
+	caller, ok := callerFromRequest(r)
+	if !ok {
+		writeErr(w, errs.ErrUnauthorized)
+		return
+	}
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if _, err := h.incidents.GetIncident(r.Context(), caller, id); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if h.investigations == nil || h.investigationTrace == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"incident_id": id,
+			"status":      "feature_disabled",
+			"items":       []InvestigationToolCall{},
+			"total":       0,
+		})
+		return
+	}
+	rep, err := h.investigations.GetByIncident(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, errs.ErrNotFound) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"incident_id": id,
+				"status":      "not_started",
+				"items":       []InvestigationToolCall{},
+				"total":       0,
+			})
+			return
+		}
+		writeErr(w, err)
+		return
+	}
+	if rep.AuditSessionID == nil || strings.TrimSpace(*rep.AuditSessionID) == "" {
+		writeJSON(w, http.StatusOK, listInvestigationToolCallsResp{Items: []InvestigationToolCall{}, Total: 0})
+		return
+	}
+	rows, err := h.investigationTrace.ListInvestigationToolCalls(r.Context(), *rep.AuditSessionID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	items := make([]InvestigationToolCall, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, toolCallToWire(row))
+	}
+	writeJSON(w, http.StatusOK, listInvestigationToolCallsResp{Items: items, Total: len(items)})
+}
+
 // investigationReportToWire converts the DB row into the SPA's JSON
 // shape: parses the stored *_json string columns into json.RawMessage
 // so the SPA doesn't double-decode, and formats time fields as
@@ -438,6 +605,32 @@ func investigationReportToWire(rep *alertmodel.InvestigationReport) *Investigati
 	return out
 }
 
+func toolCallToWire(tc *aiopsmodel.ToolCall) InvestigationToolCall {
+	out := InvestigationToolCall{
+		ID:        tc.ID,
+		LLMCallID: tc.LLMCallID,
+		MessageID: tc.MessageID,
+		ToolName:  tc.ToolName,
+		DeviceID:  tc.DeviceID,
+		Status:    tc.Status,
+		Error:     tc.Error,
+		Arguments: rawJSONOrString(tc.ArgumentsJSON),
+		Result:    rawPtrJSONOrString(tc.ResultJSON),
+		StartedAt: tc.StartedAt.UTC().Format(time.RFC3339),
+		CreatedAt: tc.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if tc.EndedAt != nil {
+		s := tc.EndedAt.UTC().Format(time.RFC3339)
+		out.EndedAt = &s
+		ms := tc.EndedAt.Sub(tc.StartedAt).Milliseconds()
+		if ms < 0 {
+			ms = 0
+		}
+		out.DurationMS = &ms
+	}
+	return out
+}
+
 func rawOrNil(s string) json.RawMessage {
 	s = stripWhitespace(s)
 	if s == "" || s == "null" {
@@ -453,6 +646,25 @@ func stripWhitespace(s string) string {
 		}
 	}
 	return ""
+}
+
+func rawJSONOrString(s string) json.RawMessage {
+	s = stripWhitespace(s)
+	if s == "" {
+		return nil
+	}
+	if json.Valid([]byte(s)) {
+		return json.RawMessage(s)
+	}
+	b, _ := json.Marshal(s)
+	return json.RawMessage(b)
+}
+
+func rawPtrJSONOrString(s *string) json.RawMessage {
+	if s == nil {
+		return nil
+	}
+	return rawJSONOrString(*s)
 }
 
 func (h *Handler) ackIncident(w http.ResponseWriter, r *http.Request) {
@@ -863,7 +1075,6 @@ func (h *Handler) deleteRule(w http.ResponseWriter, r *http.Request) {
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
-
 
 func ruleReqToSvc(req ruleReq) svc.RuleInput {
 	return svc.RuleInput{

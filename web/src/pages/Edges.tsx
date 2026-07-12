@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Plus, RotateCw, Trash2, MoreVertical, Copy, Check, ExternalLink, TerminalSquare } from 'lucide-react';
+import { Activity, Plus, RotateCw, Trash2, MoreVertical, Copy, Check, ExternalLink, TerminalSquare } from 'lucide-react';
 import { StatusPill } from '@/components/StatusPill';
 import { Modal } from '@/components/Modal';
 import { cn } from '@/lib/cn';
@@ -14,11 +14,13 @@ import {
   deleteEdge,
   rotateSecret,
   setEdgeRoles,
+  updateDeviceProfile,
   EDGE_ROLES,
   EDGE_ROLE_LABELS,
   EDGE_ROLE_LABELS_EN,
   type Edge,
   type EdgeRole,
+  type AssetProfile,
   type CreateEdgeResponse,
   type RotateSecretResponse,
   upgradeEdgeAgent,
@@ -28,6 +30,7 @@ import {
   batchDeleteEdges,
   type BatchResponse,
 } from '@/api/edges';
+import { listDataSources, type DataSource } from '@/api/datasources';
 import { getManagerVersion } from '@/api/version';
 import { usePermissions } from '@/store/me';
 import { notifyDevicesChanged } from '@/lib/events';
@@ -38,11 +41,11 @@ import { useI18n } from '@/i18n/locale';
 // title and the role editor share a single source of truth.
 // Each entry is a [zh, en] pair consumed via tr() below.
 const ROLE_FILTER_TITLES: Record<string, [string, string]> = {
-  '': ['全部设备', 'All devices'],
+  '': ['全部资产', 'All assets'],
   server: ['服务器', 'Servers'],
   storage: ['存储', 'Storage'],
   network: ['网络设备', 'Network devices'],
-  unknown: ['未分类设备', 'Uncategorized devices'],
+  unknown: ['未分类资产', 'Uncategorized assets'],
 };
 
 export default function EdgesPage() {
@@ -59,7 +62,7 @@ export default function EdgesPage() {
   }, [location.search]);
   const headerTitle = (() => {
     const pair = ROLE_FILTER_TITLES[rolesFilter];
-    return pair ? tr(pair[0], pair[1]) : tr('设备', 'Devices');
+    return pair ? tr(pair[0], pair[1]) : tr('资产', 'Assets');
   })();
 
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -81,6 +84,7 @@ export default function EdgesPage() {
     secretKey: string;
   } | null>(null);
   const [rolesEditTarget, setRolesEditTarget] = useState<Edge | null>(null);
+  const [assetEditTarget, setAssetEditTarget] = useState<Edge | null>(null);
   const [upgradeTarget, setUpgradeTarget] = useState<Edge | null>(null);
   // per-row "整包升级" busy state + last-result toast. We don't
   // open a modal — the action is single-click and the result lands in
@@ -301,7 +305,7 @@ export default function EdgesPage() {
           <div>
             <h1 className="text-base font-semibold text-zinc-100">{headerTitle}</h1>
             <p className="mt-0.5 text-xs text-zinc-500">
-              {tr(`${edges.length} 台设备 · 每 10 秒自动刷新`, `${edges.length} device(s) · auto-refresh every 10s`)}
+              {tr(`${edges.length} 个资产 · 每 10 秒自动刷新`, `${edges.length} asset(s) · auto-refresh every 10s`)}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -391,12 +395,12 @@ export default function EdgesPage() {
                   </th>
                   <th className="px-4 py-2.5 text-left">ID</th>
                   <th className="px-4 py-2.5 text-left">{tr('名称', 'Name')}</th>
+                  <th className="px-4 py-2.5 text-left">{tr('资产画像', 'Asset profile')}</th>
                   <th className="px-4 py-2.5 text-left">{tr('主机名', 'Hostname')}</th>
                   <th className="px-4 py-2.5 text-left">IP</th>
                   <th className="px-4 py-2.5 text-left">{tr('角色', 'Roles')}</th>
                   <th className="px-4 py-2.5 text-left">{tr('状态', 'Status')}</th>
                   <th className="px-4 py-2.5 text-left">{tr('最后心跳', 'Last heartbeat')}</th>
-                  <th className="px-4 py-2.5 text-left">Access Key</th>
                   <th className="px-4 py-2.5 text-left">Agent</th>
                   <th className="px-4 py-2.5 text-right">{tr('操作', 'Actions')}</th>
                 </tr>
@@ -451,9 +455,24 @@ export default function EdgesPage() {
                         {e.id}
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-100">
-                        {e.name || (
-                          <span className="italic text-zinc-500">{tr('（待主机上线）', '(waiting for host)')}</span>
+                        <div>{e.name || (
+                          <span className="italic text-zinc-500">{tr('????????', '(waiting for host)')}</span>
+                        )}</div>
+                        {e.device_id != null && (
+                          <button type="button" onClick={(ev) => { ev.stopPropagation(); navigate(`/devices/${encodeURIComponent(String(e.device_id))}/observability`); }} className="mt-1 inline-flex items-center gap-1 text-[11px] text-sky-300 hover:text-sky-200">
+                            <Activity size={12} /> 观测详情
+                          </button>
                         )}
+                      </td>
+                      <td
+                        className="min-w-48 cursor-pointer px-4 py-2.5"
+                        title={tr('点击编辑资产画像', 'Click to edit asset profile')}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          setAssetEditTarget(e);
+                        }}
+                      >
+                        <AssetProfileSummary profile={e.asset_profile} />
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
                         {extractHostname(e.host_info) ?? '—'}
@@ -476,11 +495,6 @@ export default function EdgesPage() {
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5 text-zinc-400">
                         {e.last_seen_at ? relativeTime(e.last_seen_at) : '—'}
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">
-                        <span className="rounded bg-zinc-800/60 px-1.5 py-0.5">
-                          {e.access_key_id.slice(0, 8)}…
-                        </span>
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-zinc-400">
                         <AgentVersionCell agentVersion={e.agent_version} managerVersion={managerVersion} />
@@ -537,6 +551,16 @@ export default function EdgesPage() {
           onClose={() => setRolesEditTarget(null)}
           onSaved={() => {
             setRolesEditTarget(null);
+            void refresh();
+          }}
+        />
+      )}
+      {assetEditTarget && (
+        <AssetProfileModal
+          edge={assetEditTarget}
+          onClose={() => setAssetEditTarget(null)}
+          onSaved={() => {
+            setAssetEditTarget(null);
             void refresh();
           }}
         />
@@ -836,6 +860,280 @@ function BatchUpgradeModal({
         </div>
       </div>
     </Modal>
+  );
+}
+
+function AssetProfileSummary({ profile }: { profile?: AssetProfile }) {
+  const { tr } = useI18n();
+  const p = profile ?? {};
+  const business = p.business_system?.trim();
+  const env = p.environment?.trim();
+  const region = p.region?.trim();
+  const cloud = p.cloud_provider?.trim();
+  const owner = p.owner?.trim();
+  const criticality = p.criticality?.trim();
+  if (!business && !env && !region && !cloud && !owner && !criticality) {
+    return (
+      <span className="inline-flex items-center rounded border border-dashed border-zinc-700 px-1.5 py-0.5 text-[11px] text-zinc-500 hover:border-accent hover:text-accent">
+        {tr('补充画像', 'Add profile')}
+      </span>
+    );
+  }
+  return (
+    <div className="flex max-w-64 flex-wrap items-center gap-1">
+      {business && (
+        <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[11px] text-sky-300">
+          {business}
+        </span>
+      )}
+      {env && (
+        <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[11px] text-emerald-300">
+          {env}
+        </span>
+      )}
+      {region && (
+        <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[11px] text-cyan-300">
+          {region}
+        </span>
+      )}
+      {cloud && (
+        <span className="rounded border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[11px] text-violet-300">
+          {cloud}
+        </span>
+      )}
+      {criticality && (
+        <span className="rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-300">
+          {criticality}
+        </span>
+      )}
+      {owner && <span className="text-[11px] text-zinc-400">{owner}</span>}
+    </div>
+  );
+}
+
+function AssetProfileModal({
+  edge,
+  onClose,
+  onSaved,
+}: {
+  edge: Edge;
+  onClose(): void;
+  onSaved(): void;
+}) {
+  const { tr } = useI18n();
+  const profile = edge.asset_profile ?? {};
+  const [name, setName] = useState(edge.name ?? '');
+  const [businessSystem, setBusinessSystem] = useState(profile.business_system ?? '');
+  const [environment, setEnvironment] = useState(profile.environment ?? '');
+  const [region, setRegion] = useState(profile.region ?? '');
+  const [datacenter, setDatacenter] = useState(profile.datacenter ?? '');
+  const [cloudProvider, setCloudProvider] = useState(profile.cloud_provider ?? '');
+  const [owner, setOwner] = useState(profile.owner ?? '');
+  const [criticality, setCriticality] = useState(profile.criticality ?? '');
+  const [securityLevel, setSecurityLevel] = useState(profile.security_level ?? '');
+  const [maintenanceWindow, setMaintenanceWindow] = useState(profile.maintenance_window ?? '');
+  const [assetType, setAssetType] = useState(profile.asset_type ?? 'server');
+  const [collectionMode, setCollectionMode] = useState(profile.collection_mode ?? 'edge_agent');
+  const [externalSource, setExternalSource] = useState(profile.external_source ?? '');
+  const [externalRef, setExternalRef] = useState(profile.external_ref ?? '');
+  const [metricDatasourceID, setMetricDatasourceID] = useState(profile.metric_datasource_id ? String(profile.metric_datasource_id) : '');
+  const [metricMatcher, setMetricMatcher] = useState(profile.metric_matcher ?? '');
+  const [logDatasourceID, setLogDatasourceID] = useState(profile.log_datasource_id ? String(profile.log_datasource_id) : '');
+  const [logMatcher, setLogMatcher] = useState(profile.log_matcher ?? '');
+  const [tags, setTags] = useState((profile.tags ?? []).join(', '));
+  const [datasources, setDatasources] = useState<DataSource[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    listDataSources()
+      .then((r) => setDatasources(r.items ?? []))
+      .catch(() => setDatasources([]));
+  }, []);
+
+  const submit = async () => {
+    if (edge.device_id == null) {
+      setErr(tr('该 Edge 尚未绑定 device，等待 agent 上线后再编辑资产画像。', 'This edge has no linked device yet. Wait for the agent to come online before editing the asset profile.'));
+      return;
+    }
+    setSubmitting(true);
+    setErr(null);
+    try {
+      await updateDeviceProfile(edge.device_id, {
+        name,
+        business_system: businessSystem,
+        environment,
+        region,
+        datacenter,
+        cloud_provider: cloudProvider,
+        owner,
+        criticality,
+        security_level: securityLevel,
+        maintenance_window: maintenanceWindow,
+        asset_type: assetType,
+        collection_mode: collectionMode,
+        external_source: externalSource,
+        external_ref: externalRef,
+        metric_datasource_id: metricDatasourceID ? Number(metricDatasourceID) : 0,
+        metric_matcher: metricMatcher,
+        log_datasource_id: logDatasourceID ? Number(logDatasourceID) : 0,
+        log_matcher: logMatcher,
+        tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
+      });
+      notifyDevicesChanged();
+      onSaved();
+    } catch (e) {
+      setErr((e as Error).message || tr('保存失败', 'Save failed'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={tr(`资产画像 · ${edge.name}`, `Asset profile · ${edge.name}`)}
+      size="md"
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+          >
+            {tr('取消', 'Cancel')}
+          </button>
+          <button
+            type="button"
+            onClick={() => void submit()}
+            disabled={submitting}
+            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white disabled:opacity-50"
+          >
+            {submitting ? tr('保存中...', 'Saving...') : tr('保存', 'Save')}
+          </button>
+        </>
+      }
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        <AssetSelect label="资产类型" value={assetType} onChange={setAssetType} options={['server', 'network', 'database', 'middleware', 'app', 'other']} />
+        <AssetSelect label="纳管方式" value={collectionMode} onChange={setCollectionMode} options={['edge_agent', 'prometheus', 'loki', 'snmp', 'api', 'manual']} />
+        <AssetInput label="外部来源" value={externalSource} onChange={setExternalSource} placeholder="客户 CMDB / 网管 / Prometheus" />
+        <AssetInput label="外部 ID" value={externalRef} onChange={setExternalRef} placeholder="cmdb-ci-1001 / instance=172.20.25.2" />
+        <AssetInput label={tr('资产名称', 'Asset name')} value={name} onChange={setName} />
+        <AssetInput label={tr('业务系统', 'Business system')} value={businessSystem} onChange={setBusinessSystem} placeholder="CRM / OA / 支付平台" />
+        <AssetSelect label={tr('环境', 'Environment')} value={environment} onChange={setEnvironment} options={['生产', '预发', '测试', '开发', '灾备']} />
+        <AssetInput label="区域" value={region} onChange={setRegion} placeholder="华东 / 华北 / APAC" />
+        <AssetInput label="机房/可用区" value={datacenter} onChange={setDatacenter} placeholder="上海-A / cn-shanghai-a" />
+        <AssetSelect label="云厂商" value={cloudProvider} onChange={setCloudProvider} options={['自建IDC', '阿里云', '腾讯云', '华为云', 'AWS', 'Azure', 'GCP', '私有云']} />
+        <AssetInput label={tr('负责人', 'Owner')} value={owner} onChange={setOwner} placeholder="团队 / 姓名 / 邮箱" />
+        <AssetSelect label={tr('重要性', 'Criticality')} value={criticality} onChange={setCriticality} options={['核心', '高', '中', '低']} />
+        <AssetInput label={tr('等保/安全级别', 'Security level')} value={securityLevel} onChange={setSecurityLevel} placeholder="等保三级 / PCI / 内部" />
+        <AssetInput label="运维窗口" value={maintenanceWindow} onChange={setMaintenanceWindow} placeholder="周日 02:00-04:00" />
+        <DatasourceSelect label="指标数据源" value={metricDatasourceID} onChange={setMetricDatasourceID} type="prometheus" items={datasources} />
+        <AssetInput label="指标匹配条件" value={metricMatcher} onChange={setMetricMatcher} placeholder={'device_id="15" 或 instance="172.20.25.2:9100"'} />
+        <DatasourceSelect label="日志数据源" value={logDatasourceID} onChange={setLogDatasourceID} type="loki" items={datasources} />
+        <AssetInput label="日志匹配条件" value={logMatcher} onChange={setLogMatcher} placeholder={'host="H618-desk" 或 app="nginx"'} />
+        <label className="block sm:col-span-2">
+          <span className="mb-1 block text-[11px] text-zinc-500">{tr('标签', 'Tags')}</span>
+          <input
+            value={tags}
+            onChange={(e) => setTags(e.target.value)}
+            placeholder={tr('逗号分隔，例如: database, internet-facing', 'Comma-separated, e.g. database, internet-facing')}
+            className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+          />
+        </label>
+      </div>
+      {err && <div className="mt-3 text-xs text-red-400">{err}</div>}
+    </Modal>
+  );
+}
+
+function AssetInput({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange(value: string): void;
+  placeholder?: string;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[11px] text-zinc-500">{label}</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+      />
+    </label>
+  );
+}
+
+function DatasourceSelect({
+  label,
+  value,
+  onChange,
+  type,
+  items,
+}: {
+  label: string;
+  value: string;
+  onChange(value: string): void;
+  type: 'prometheus' | 'loki';
+  items: DataSource[];
+}) {
+  const options = items.filter((it) => it.type === type && it.enabled);
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[11px] text-zinc-500">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+      >
+        <option value="">不关联</option>
+        {options.map((it) => (
+          <option key={it.id} value={it.id}>
+            {it.name}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function AssetSelect({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange(value: string): void;
+  options: string[];
+}) {
+  const { tr } = useI18n();
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[11px] text-zinc-500">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 focus:border-zinc-600 focus:outline-none"
+      >
+        <option value="">{tr('未设置', 'Unset')}</option>
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

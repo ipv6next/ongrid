@@ -132,9 +132,11 @@ func (t *GetEdgeSummaryTool) singleEdgeSummary(ctx context.Context, deviceID uin
 	}
 
 	var roles []string
+	var assetProfile *AssetProfile
 	if t.devices != nil && edge.DeviceID != nil {
 		if d, derr := t.devices.Get(callCtx, *edge.DeviceID); derr == nil && d != nil {
 			roles = devicemodel.DecodeRoles(d.Roles)
+			assetProfile = assetProfileFromDevice(d)
 		}
 	}
 	if roles == nil {
@@ -142,13 +144,14 @@ func (t *GetEdgeSummaryTool) singleEdgeSummary(ctx context.Context, deviceID uin
 	}
 	out := map[string]any{
 		"edge": map[string]any{
-			"id":           edge.ID,
-			"device_id":    edge.DeviceID,
-			"name":         edge.Name,
-			"status":       edge.Status,
-			"roles":        roles,
-			"last_seen_at": edge.LastSeenAt,
-			"created_at":   edge.CreatedAt,
+			"id":            edge.ID,
+			"device_id":     edge.DeviceID,
+			"name":          edge.Name,
+			"status":        edge.Status,
+			"roles":         roles,
+			"asset_profile": assetProfile,
+			"last_seen_at":  edge.LastSeenAt,
+			"created_at":    edge.CreatedAt,
 		},
 	}
 

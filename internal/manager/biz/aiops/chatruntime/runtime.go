@@ -1127,7 +1127,7 @@ func (rt *Runtime) calcDynamicHints(history []*aiopsmodel.Message) []string {
 	}
 	var hints []string
 	if name, n := consecutiveFailedTool(history, 2); n >= 2 {
-		hints = append(hints, fmt.Sprintf("%s 已连续失败 %d 次：换工具，或问用户澄清", name, n))
+		hints = append(hints, fmt.Sprintf("%s 在上一轮已连续失败 %d 次：不要在单轮内空转；如果当前用户明确要求执行或重试，允许调用一次以验证当前状态", name, n))
 	}
 	// Repeat-call detection — same tool with similar args ≥ 3 times in
 	// the trailing window. This was the dominant failure mode in the

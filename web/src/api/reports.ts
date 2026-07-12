@@ -184,6 +184,18 @@ export function generateNow(body: { kind?: ReportKind; timezone?: string; scope_
   return request<ReportDetail>('POST', '/reports', body);
 }
 
+export function archiveReport(body: {
+  title: string;
+  kind?: ReportKind;
+  timezone?: string;
+  scope_json?: string;
+  content_md: string;
+  summary?: string;
+  task_id?: string;
+}) {
+  return request<ReportDetail>('POST', '/reports/archive', body);
+}
+
 export function shareReport(id: string) {
   return request<{ share_token: string; path: string }>('POST', `/reports/${id}/share`, {});
 }

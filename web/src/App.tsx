@@ -8,6 +8,7 @@ const HomePage = lazy(() => import('@/pages/Home'));
 const ChatThreadPage = lazy(() => import('@/pages/ChatThread'));
 const EdgesPage = lazy(() => import('@/pages/Edges'));
 const EdgeDetailPage = lazy(() => import('@/pages/EdgeDetail'));
+const AssetObservabilityPage = lazy(() => import('@/pages/AssetObservability'));
 const DeviceShellPage = lazy(() => import('@/pages/DeviceShell'));
 const DashboardPage = lazy(() => import('@/pages/Dashboard'));
 const MonitorPage = lazy(() => import('@/pages/Monitor'));
@@ -16,6 +17,8 @@ const TracesPage = lazy(() => import('@/pages/Traces'));
 const AlertsPage = lazy(() => import('@/pages/Alerts'));
 const AlertRulesPage = lazy(() => import('@/pages/AlertRules'));
 const IncidentDetailPage = lazy(() => import('@/pages/IncidentDetail'));
+const SecurityPatrolPage = lazy(() => import('@/pages/SecurityPatrol'));
+const EdgeSecurityPage = lazy(() => import('@/pages/EdgeSecurity'));
 const ReportDetailPage = lazy(() => import('@/pages/ReportDetail'));
 const TasksPage = lazy(() => import('@/pages/Tasks'));
 const PagesPage = lazy(() => import('@/pages/Pages'));
@@ -40,6 +43,7 @@ const SettingsLLM = lazy(() => import('@/pages/settings/LLM'));
 const SettingsNotifications = lazy(() => import('@/pages/settings/Notifications'));
 const SettingsChannels = lazy(() => import('@/pages/settings/Channels'));
 const SettingsIntegrations = lazy(() => import('@/pages/settings/Integrations'));
+const SettingsDataSources = lazy(() => import('@/pages/settings/DataSources'));
 const SettingsPreferences = lazy(() => import('@/pages/settings/Preferences'));
 const SettingsAgent = lazy(() => import('@/pages/settings/Agent'));
 const SettingsAbout = lazy(() => import('@/pages/settings/About'));
@@ -89,7 +93,8 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route path="/" element={<HomePage />} />
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/assistant" element={<HomePage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/chat/:sessionId" element={<ChatThreadPage />} />
         {/* /edges is the legacy route, kept as an alias to /devices for
@@ -98,6 +103,7 @@ export default function App() {
         <Route path="/edges" element={<Navigate to="/devices" replace />} />
         <Route path="/edges/:edgeId" element={<EdgeDetailPage />} />
         <Route path="/devices" element={<EdgesPage />} />
+        <Route path="/devices/:deviceId/observability" element={<AssetObservabilityPage />} />
         <Route path="/devices/:edgeId" element={<EdgeDetailPage />} />
         {/* WebSSH: deviceId is the Prom-label device_id, not the edge.id.
             See DeviceShell.tsx for the rationale. */}
@@ -106,8 +112,11 @@ export default function App() {
         <Route path="/logs" element={<LogsPage />} />
         <Route path="/traces" element={<TracesPage />} />
         <Route path="/alerts" element={<AlertsPage />} />
+        <Route path="/incidents" element={<Navigate to="/alerts" replace />} />
         <Route path="/alerts/rules" element={<AlertRulesPage />} />
         <Route path="/alerts/incidents/:id" element={<IncidentDetailPage />} />
+        <Route path="/patrol" element={<SecurityPatrolPage />} />
+        <Route path="/edge-security" element={<EdgeSecurityPage />} />
         {/* 报告 folded into 产物's 报告 tab; schedules became 任务. Old links redirect. */}
         <Route path="/reports" element={<Navigate to="/pages?tab=reports" replace />} />
         <Route path="/reports/schedules" element={<Navigate to="/tasks" replace />} />
@@ -160,6 +169,7 @@ export default function App() {
           <Route path="notifications" element={<SettingsNotifications />} />
           <Route path="channels" element={<SettingsChannels />} />
           <Route path="integrations" element={<SettingsIntegrations />} />
+          <Route path="datasources" element={<SettingsDataSources />} />
           <Route path="health" element={<SettingsHealth />} />
           <Route path="upgrade" element={<SettingsUpgrade />} />
           {/* /settings/marketplace retired (2026-05-19). Install surface

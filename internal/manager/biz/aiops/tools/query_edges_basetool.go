@@ -74,8 +74,15 @@ func (t *QueryEdgesTool) InvokableRun(ctx context.Context, argsJSON string, _ ..
 
 	if t.devices != nil {
 		f := devicebiz.ListFilter{
-			Name:  in.NameContains,
-			Limit: in.Limit,
+			Name:           in.NameContains,
+			BusinessSystem: in.BusinessSystem,
+			Environment:    in.Environment,
+			Region:         in.Region,
+			Datacenter:     in.Datacenter,
+			CloudProvider:  in.CloudProvider,
+			Owner:          in.Owner,
+			Criticality:    in.Criticality,
+			Limit:          in.Limit,
 		}
 		switch in.Status {
 		case "":
@@ -119,12 +126,13 @@ func (t *QueryEdgesTool) InvokableRun(ctx context.Context, argsJSON string, _ ..
 				continue
 			}
 			rows = append(rows, EdgeRow{
-				ID:         d.ID,
-				Name:       d.Name,
-				Hostname:   d.Hostname,
-				Online:     d.Online,
-				Roles:      devicemodel.DecodeRoles(d.Roles),
-				LastSeenAt: d.LastSeenAt,
+				ID:           d.ID,
+				Name:         d.Name,
+				Hostname:     d.Hostname,
+				Online:       d.Online,
+				Roles:        devicemodel.DecodeRoles(d.Roles),
+				LastSeenAt:   d.LastSeenAt,
+				AssetProfile: assetProfileFromDevice(d),
 			})
 			if len(rows) >= in.Limit {
 				break

@@ -6,7 +6,7 @@
 // touch the SPA session.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { AppWindow, Bot, Check, ExternalLink, Eye, FileBarChart, Loader2, Search, Share2, Trash2, Workflow } from 'lucide-react';
+import { AppWindow, Bot, Check, ClipboardList, ExternalLink, Eye, FileBarChart, FileText, Loader2, Search, Share2, ShieldCheck, Trash2, Workflow } from 'lucide-react';
 
 import { deletePage, fetchPageHTML, listPages, sharePage, type HostedPage } from '@/api/pages';
 import { cn } from '@/lib/cn';
@@ -15,6 +15,8 @@ import { useAuth } from '@/store/auth';
 import { PageHeader, Button, EmptyState } from '@/components/ui';
 import { Modal } from '@/components/Modal';
 import { ReportCards } from '@/components/ReportCards';
+import { generateNow } from '@/api/reports';
+import { normalizeHtmlArtifact } from '@/lib/htmlArtifact';
 
 const THUMB_W = 1100;
 
@@ -57,7 +59,7 @@ function PageThumb({ id }: { id: string }) {
   useEffect(() => {
     let alive = true;
     fetchPageHTML(id)
-      .then((h) => alive && setHtml(h))
+      .then((h) => alive && setHtml(normalizeHtmlArtifact(h)))
       .catch(() => alive && setHtml('<!doctype html><body></body>'));
     return () => {
       alive = false;
@@ -143,7 +145,7 @@ export default function PagesPage() {
     let alive = true;
     setPreviewHtml(null);
     fetchPageHTML(preview.id)
-      .then((h) => alive && setPreviewHtml(h))
+      .then((h) => alive && setPreviewHtml(normalizeHtmlArtifact(h)))
       .catch(() => alive && setPreviewHtml('<!doctype html><body style="font-family:sans-serif;padding:2rem;color:#888">加载失败 / failed to load</body>'));
     return () => {
       alive = false;
@@ -247,7 +249,7 @@ export default function PagesPage() {
       </div>
 
       {tab === 'reports' ? (
-        <ReportsTabView />
+        <ReportsTabView2 />
       ) : (
         <>
       {items.length > 0 && (
@@ -406,5 +408,108 @@ function ReportsTabView() {
         />
       </div>
     </div>
+  );
+}
+
+function ReportsTabView2() {
+  const navigate = useNavigate();
+  const [generating, setGenerating] = useState('');
+
+  const runOpsReport = async (kind: 'weekly' | 'monthly') => {
+    if (generating) return;
+    setGenerating(kind);
+    try {
+      const r = await generateNow({
+        kind,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        scope_json: JSON.stringify({ template: kind === 'weekly' ? 'weekly_ops' : 'monthly_ops' }),
+      });
+      navigate(`/reports/${r.id}`);
+    } catch (e) {
+      window.alert((e as Error).message || '生成报告失败');
+    } finally {
+      setGenerating('');
+    }
+  };
+
+  return (
+    <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex-1 overflow-y-auto px-6 py-4">
+        <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+          <ReportTemplateCard
+            icon={FileText}
+            title="RCA 报告"
+            desc="从事件详情的根因分析结果归档，保留事件、证据链和建议动作。"
+            action="去事件列表"
+            onClick={() => navigate('/alerts')}
+          />
+          <ReportTemplateCard
+            icon={ShieldCheck}
+            title="巡检报告"
+            desc="从安全巡检结果归档，保留检查项、风险等级、命令输出和结论。"
+            action="去安全巡检"
+            onClick={() => navigate('/patrol')}
+          />
+          <ReportTemplateCard
+            icon={ClipboardList}
+            title="周/月报告"
+            desc="复用 Ongrid Report domain，汇总事件、审计、资产和 Agent 动作。"
+            action={generating === 'weekly' ? '生成中...' : '生成周报'}
+            secondaryAction={generating === 'monthly' ? '生成中...' : '生成月报'}
+            onClick={() => void runOpsReport('weekly')}
+            onSecondaryClick={() => void runOpsReport('monthly')}
+          />
+        </div>
+        <ReportCards showFilters emptyHint="暂无报告。可先从事件详情或安全巡检归档报告，也可以生成周/月报告。" />
+      </div>
+    </div>
+  );
+}
+
+function ReportTemplateCard({
+  icon: Icon,
+  title,
+  desc,
+  action,
+  secondaryAction,
+  onClick,
+  onSecondaryClick,
+}: {
+  icon: typeof FileText;
+  title: string;
+  desc: string;
+  action: string;
+  secondaryAction?: string;
+  onClick(): void;
+  onSecondaryClick?(): void;
+}) {
+  return (
+    <section className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
+      <div className="flex items-center gap-2">
+        <span className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-indigo-500/10 text-indigo-200">
+          <Icon size={16} />
+        </span>
+        <h3 className="text-sm font-semibold text-zinc-100">{title}</h3>
+      </div>
+      <p className="mt-2 min-h-[40px] text-xs leading-relaxed text-zinc-500">{desc}</p>
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onClick}
+          className="inline-flex items-center rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
+        >
+          {action}
+        </button>
+        {secondaryAction && onSecondaryClick && (
+          <button
+            type="button"
+            onClick={onSecondaryClick}
+            className="inline-flex items-center rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
+          >
+            {secondaryAction}
+          </button>
+        )}
+      </div>
+    </section>
   );
 }

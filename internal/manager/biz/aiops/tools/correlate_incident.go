@@ -140,13 +140,14 @@ type traceEntry struct {
 }
 
 type edgeSnapshot struct {
-	ID                 uint64       `json:"id"`
-	Name               string       `json:"name"`
-	Status             string       `json:"status"`
-	Roles              []string     `json:"roles,omitempty"`
-	LastSeenAt         *time.Time   `json:"last_seen_at,omitempty"`
-	CurrentLoad        *currentLoad `json:"current_load,omitempty"`
-	RecentIncidents24h int          `json:"recent_incidents_24h"`
+	ID                 uint64        `json:"id"`
+	Name               string        `json:"name"`
+	Status             string        `json:"status"`
+	Roles              []string      `json:"roles,omitempty"`
+	AssetProfile       *AssetProfile `json:"asset_profile,omitempty"`
+	LastSeenAt         *time.Time    `json:"last_seen_at,omitempty"`
+	CurrentLoad        *currentLoad  `json:"current_load,omitempty"`
+	RecentIncidents24h int           `json:"recent_incidents_24h"`
 }
 
 type currentLoad struct {
@@ -553,6 +554,7 @@ func (r *Registry) queryEdgeSnapshot(ctx context.Context, edgeID uint64, firedAt
 		if r.devices != nil && edge.DeviceID != nil {
 			if d, derr := r.devices.Get(edgeCtx, *edge.DeviceID); derr == nil && d != nil {
 				snap.Roles = devicemodel.DecodeRoles(d.Roles)
+				snap.AssetProfile = assetProfileFromDevice(d)
 			}
 		}
 	} else if err != nil && !errors.Is(err, context.Canceled) {

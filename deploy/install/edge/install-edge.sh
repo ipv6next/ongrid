@@ -336,6 +336,13 @@ else
     log_error "  fix: mkdir -p $STATE_DIR; chown $SERVICE_USER:$SERVICE_GROUP $STATE_DIR; chmod 0755 $STATE_DIR; systemctl restart ongrid-edge"
     SELFCHECK_FAIL=1
 fi
+if [[ -d "$LOG_DIR" ]]; then
+    log_info "log dir present for systemd sandbox: $LOG_DIR"
+else
+    log_error "log dir missing: $LOG_DIR — on systems enforcing ReadWritePaths, ongrid-edge may fail with status=226/NAMESPACE"
+    log_error "  fix: mkdir -p $LOG_DIR; chown $SERVICE_USER:$SERVICE_GROUP $LOG_DIR; chmod 750 $LOG_DIR; systemctl restart ongrid-edge"
+    SELFCHECK_FAIL=1
+fi
 
 # 2) service user can read the journal (logs plugin journald source).
 # Group membership added above is visible to a fresh runuser/sudo session.
