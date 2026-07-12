@@ -71,12 +71,23 @@ func (u *Usecase) finalizeProductArtifacts(ctx context.Context, f *flowmodel.Flo
 			u.log.Warn("flow approval finalizer failed", "run_id", run.ID, "err", err)
 		}
 	}
-	if artifact.kind == "alert" || artifact.kind == "patrol" || artifact.kind == "report" {
+	if (artifact.kind == "alert" || artifact.kind == "patrol" || artifact.kind == "report") && shouldArchiveWorkflowReport(f) {
 		if err := u.finalizeReport(ctx, run, artifact); err != nil {
 			u.log.Warn("flow report finalizer failed", "run_id", run.ID, "err", err)
 		}
 	}
 	return nil
+}
+
+// A Planner-generated workflow can explicitly choose a Web report or no
+// report. Existing workflows without a marker keep the historical archive
+// behaviour.
+func shouldArchiveWorkflowReport(f *flowmodel.Flow) bool {
+	if f == nil {
+		return true
+	}
+	text := f.Name + " " + f.Description
+	return !strings.Contains(text, "[报告:web]") && !strings.Contains(text, "[报告:none]")
 }
 
 func buildFlowArtifact(f *flowmodel.Flow, run *flowmodel.FlowRun, nodes []*flowmodel.FlowRunNode) flowArtifact {

@@ -530,6 +530,8 @@ function CreateFlowModal({
   const [mode, setMode] = useState<'ai' | 'blank'>('ai');
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [reportMode, setReportMode] = useState<'auto' | 'archive' | 'web' | 'none'>('auto');
+  const [allowChanges, setAllowChanges] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [draft, setDraft] = useState<FlowPlan | null>(null);
@@ -561,7 +563,7 @@ function CreateFlowModal({
     setBusy(true);
     setErr('');
     try {
-      setDraft(await planFlow(prompt.trim()));
+      setDraft(await planFlow(prompt.trim(), { report_mode: reportMode, allow_changes: allowChanges }));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -612,6 +614,21 @@ function CreateFlowModal({
               placeholder="例如：检查设备 5 的 Docker 容器，发现异常后生成 RCA 报告，不执行修改操作。"
               className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[13px] text-zinc-200 outline-none focus:border-zinc-600"
             />
+            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <label className="block text-[11px] text-zinc-400">
+                报告输出
+                <select value={reportMode} onChange={(e) => { setReportMode(e.target.value as typeof reportMode); setDraft(null); }} className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 outline-none focus:border-zinc-600">
+                  <option value="auto">由 Planner 推荐</option>
+                  <option value="archive">归档报告（报告中心）</option>
+                  <option value="web">Web 报告（可视化页面）</option>
+                  <option value="none">不生成报告</option>
+                </select>
+              </label>
+              <label className="mt-5 flex items-center gap-2 text-[11px] text-zinc-400">
+                <input type="checkbox" checked={allowChanges} onChange={(e) => { setAllowChanges(e.target.checked); setDraft(null); }} className="accent-indigo-500" />
+                允许规划变更建议（仍需人工确认）
+              </label>
+            </div>
             {draft && (
               <div className="mt-3 rounded-md border border-indigo-500/30 bg-indigo-500/5 p-3">
                 <div className="flex items-center gap-2 text-xs font-medium text-indigo-200">
@@ -633,6 +650,11 @@ function CreateFlowModal({
                   ))}
                 </div>
                 {!!draft.required_inputs?.length && <div className="mt-2 text-[10px] text-zinc-400">运行时需要：{draft.required_inputs.map((input) => input.label).join('、')}</div>}
+                {!!draft.questions?.length && (
+                  <div className="mt-2 space-y-1 rounded border border-sky-500/20 bg-sky-500/5 p-2 text-[10px] text-sky-100">
+                    {draft.questions.map((question) => <div key={question.key}>需要确认：{question.question}</div>)}
+                  </div>
+                )}
                 {!!draft.risks?.length && (
                   <div className="mt-2 space-y-1 rounded border border-amber-500/20 bg-amber-500/5 p-2 text-[10px] text-amber-100">
                     {draft.risks.map((risk, index) => <div key={`${risk.level}-${index}`} className="flex gap-1"><AlertTriangle size={12} className="mt-0.5 shrink-0" />{risk.message}</div>)}

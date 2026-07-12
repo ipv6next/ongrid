@@ -235,13 +235,15 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 // generated graph and explicitly create the workflow afterwards.
 func (h *Handler) plan(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Prompt string `json:"prompt"`
+		Prompt       string `json:"prompt"`
+		ReportMode   string `json:"report_mode"`
+		AllowChanges bool   `json:"allow_changes"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
 		writeErr(w, errors.Join(errs.ErrInvalid, err))
 		return
 	}
-	draft, err := h.uc.PlanWorkflow(r.Context(), in.Prompt)
+	draft, err := h.uc.PlanWorkflowWithOptions(r.Context(), in.Prompt, bizflow.PlannerOptions{ReportMode: in.ReportMode, AllowChanges: in.AllowChanges})
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -260,6 +262,7 @@ func (h *Handler) plan(w http.ResponseWriter, r *http.Request) {
 		"template_key":    draft.TemplateKey,
 		"steps":           draft.Steps,
 		"required_inputs": draft.RequiredInputs,
+		"questions":       draft.Questions,
 		"risks":           draft.Risks,
 		"warnings":        draft.Warnings,
 	})

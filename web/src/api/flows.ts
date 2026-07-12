@@ -97,13 +97,14 @@ export type FlowPlan = {
     required: boolean;
     reason: string;
   }>;
+  questions?: Array<{ key: string; question: string; required: boolean }>;
   risks?: Array<{ level: string; message: string }>;
   warnings?: string[];
 };
 
 /** Drafts a workflow for review; it is not persisted until createFlow(). */
-export function planFlow(prompt: string) {
-  return request<FlowPlan>('POST', '/flows/plan', { prompt });
+export function planFlow(prompt: string, options?: { report_mode?: 'auto' | 'archive' | 'web' | 'none'; allow_changes?: boolean }) {
+  return request<FlowPlan>('POST', '/flows/plan', { prompt, ...options });
 }
 
 export function updateFlow(id: number, body: { name?: string; description?: string; graph?: FlowGraph }) {

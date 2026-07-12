@@ -28,3 +28,34 @@ func TestPlanWorkflow_ContainerUsesSpecialist(t *testing.T) {
 		t.Fatal("container plan should expose edge policy risk")
 	}
 }
+
+func TestPlanWorkflow_AlertUsesInvestigatorAndWebReport(t *testing.T) {
+	u := NewUsecase(nil, nil, nil, nil)
+	draft, err := u.PlanWorkflowWithOptions(context.Background(), "告警触发后自动调查", PlannerOptions{ReportMode: "web"})
+	if err != nil {
+		t.Fatalf("PlanWorkflowWithOptions() error = %v", err)
+	}
+	if draft.TemplateKey != "alert-auto-investigation" {
+		t.Fatalf("template key = %q", draft.TemplateKey)
+	}
+	if !strings.Contains(draft.GraphJSON, `"persona":"incident-investigator"`) {
+		t.Fatalf("alert plan did not select incident-investigator: %s", draft.GraphJSON)
+	}
+	if !strings.Contains(draft.GraphJSON, `"tool":"serve_page"`) {
+		t.Fatalf("web report plan did not contain serve_page: %s", draft.GraphJSON)
+	}
+}
+
+func TestPlanWorkflow_PatrolUsesRuntimeDevice(t *testing.T) {
+	u := NewUsecase(nil, nil, nil, nil)
+	draft, err := u.PlanWorkflowWithOptions(context.Background(), "生成安全巡检风险报告", PlannerOptions{ReportMode: "archive"})
+	if err != nil {
+		t.Fatalf("PlanWorkflowWithOptions() error = %v", err)
+	}
+	if draft.TemplateKey != "patrol-risk-report" {
+		t.Fatalf("template key = %q", draft.TemplateKey)
+	}
+	if !strings.Contains(draft.GraphJSON, `"device_ids":["{{trigger.device_id}}"]`) {
+		t.Fatalf("patrol plan did not use runtime device_ids: %s", draft.GraphJSON)
+	}
+}
