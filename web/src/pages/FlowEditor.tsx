@@ -65,6 +65,7 @@ import {
   type FlowRunNode,
 } from '@/api/flows';
 import { listAgents } from '@/api/agents';
+import { listDevices, type Device } from '@/api/devices';
 import { useI18n } from '@/i18n/locale';
 import { useAuth } from '@/store/auth';
 import { toolGroupKey, groupTag, groupTitle, orderedGroupKeys } from '@/lib/toolSkill';
@@ -350,6 +351,7 @@ export default function FlowEditorPage() {
   const [testing, setTesting] = useState(false);
   const [testErr, setTestErr] = useState('');
   const [runInputText, setRunInputText] = useState('');
+  const [runDeviceID, setRunDeviceID] = useState('');
   const [showRunInput, setShowRunInput] = useState(false);
   const [runInputErr, setRunInputErr] = useState('');
   const seq = useRef(1);
@@ -360,6 +362,7 @@ export default function FlowEditorPage() {
   const [nodeSpecs, setNodeSpecs] = useState<Record<string, NodeType>>({});
   // available agent personas, for the Agent node's persona dropdown.
   const [agentNames, setAgentNames] = useState<string[]>([]);
+  const [devices, setDevices] = useState<Device[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -416,6 +419,20 @@ export default function FlowEditorPage() {
       })
       .catch(() => {
         /* tools palette is best-effort; canvas works without it */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    listDevices()
+      .then((r) => {
+        if (alive) setDevices(r.items ?? []);
+      })
+      .catch(() => {
+        if (alive) setDevices([]);
       });
     return () => {
       alive = false;
@@ -626,6 +643,25 @@ export default function FlowEditorPage() {
     [applyRunToCanvas, tr]
   );
 
+  const selectRunDevice = useCallback((value: string) => {
+    setRunDeviceID(value);
+    if (!value) return;
+    let next: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(runInputText || '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        next = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Replacing invalid draft JSON with a valid device payload is friendlier
+      // than leaving the operator with a broken run form.
+    }
+    const id = Number(value);
+    next.device_id = id;
+    next.device_ids = [id];
+    setRunInputText(JSON.stringify(next, null, 2));
+  }, [runInputText]);
+
   const onRun = useCallback(async () => {
     if (!flow) return;
     setError('');
@@ -676,7 +712,6 @@ export default function FlowEditorPage() {
     }
   }, [flow, dirty, nodes, onSave, pollRun, runInputText, tr]);
 
-  const hasManualTrigger = useMemo(() => nodes.some((n) => n.data.flowType === 'trigger.manual'), [nodes]);
   // node id → descriptive canvas label, so the run detail shows "get_edge_summary"
   // instead of the bare graph id ("a"/"b"/…) for unnamed AI-generated nodes.
   const nodeLabelByID = useMemo(() => new Map(nodes.map((n) => [n.id, n.data.label])), [nodes]);
@@ -747,7 +782,7 @@ export default function FlowEditorPage() {
               <Save size={14} />
               {tr('保存', 'Save')}
             </button>
-            {hasManualTrigger && (
+            {canWrite && (
               <div className="relative">
                 <button
                   type="button"
@@ -760,11 +795,26 @@ export default function FlowEditorPage() {
                   }`}
                 >
                   <Variable size={14} />
-                  {tr('输入', 'Input')}
+                  {tr('运行参数', 'Run input')}
                 </button>
                 {showRunInput && (
                   <div className="absolute right-0 top-full z-30 mt-1 w-72 rounded-md border border-zinc-700 bg-zinc-900 p-2 shadow-lg">
-                    <div className="mb-1 text-[11px] font-medium text-zinc-300">{tr('手动触发输入（JSON）', 'Manual trigger input (JSON)')}</div>
+                    <div className="mb-1 text-[11px] font-medium text-zinc-300">{tr('运行参数（JSON）', 'Run input (JSON)')}</div>
+                    <label className="mb-2 block">
+                      <span className="mb-1 block text-[11px] text-zinc-500">运行设备</span>
+                      <select
+                        value={runDeviceID}
+                        onChange={(e) => selectRunDevice(e.target.value)}
+                        className="w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 outline-none focus:border-indigo-500"
+                      >
+                        <option value="">不指定设备</option>
+                        {devices.map((device) => (
+                          <option key={device.id} value={String(device.id)}>
+                            #{device.id} {device.name || device.hostname || '未命名设备'}{device.online ? ' · 在线' : ' · 离线'}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     <textarea
                       value={runInputText}
                       onChange={(e) => setRunInputText(e.target.value)}
@@ -774,7 +824,7 @@ export default function FlowEditorPage() {
                       className="w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 font-mono text-[11px] text-zinc-200 outline-none focus:border-zinc-600"
                     />
                     <div className="mt-1 text-[10px] leading-relaxed text-zinc-600">
-                      {tr('运行时作为触发器载荷；节点用 {{trigger.字段}} 引用。', 'Used as the trigger payload at run time; reference it with {{trigger.<field>}}.')}
+                      {tr('选择设备会自动写入 device_id 和 device_ids；节点参数用 {{trigger.device_id}} 或 {{trigger.device_ids}} 引用。', 'Selecting a device fills device_id and device_ids; reference them as {{trigger.device_id}} or {{trigger.device_ids}}.')}
                     </div>
                     {runInputErr && <div className="mt-1 text-[10px] text-red-400">{runInputErr}</div>}
                   </div>

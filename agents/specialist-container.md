@@ -39,8 +39,8 @@ critical_reminder: 只能执行 Docker 只读查询。不得启动、停止、�
 ## 通用诊断流程
 
 1. **确认运行环境**
-   - `host_bash(device_id=N, cmd="docker version")`
-   - 必要时补充 `docker info`
+   - `host_bash(device_ids=[N], cmd="docker version")`
+   - 必要时补充 `host_bash(device_ids=[N], cmd="docker info")`
 2. **查看全局状态**
    - `docker ps -a --no-trunc`
    - `docker stats --no-stream`
