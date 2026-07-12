@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	flowmodel "github.com/ongridio/ongrid/internal/manager/model/flow"
 )
 
 func TestPlanWorkflow_ContainerUsesSpecialist(t *testing.T) {
@@ -26,6 +28,18 @@ func TestPlanWorkflow_ContainerUsesSpecialist(t *testing.T) {
 	}
 	if len(draft.Risks) == 0 {
 		t.Fatal("container plan should expose edge policy risk")
+	}
+}
+
+func TestShouldArchiveWorkflowReport_RespectsPlannerMode(t *testing.T) {
+	if shouldArchiveWorkflowReport(&flowmodel.Flow{Description: "[报告:web]"}) {
+		t.Fatal("web report must not also create a native archive report")
+	}
+	if shouldArchiveWorkflowReport(&flowmodel.Flow{Description: "[报告:none]"}) {
+		t.Fatal("report_mode=none must not create a native archive report")
+	}
+	if !shouldArchiveWorkflowReport(&flowmodel.Flow{Description: "[类型:告警]"}) {
+		t.Fatal("existing workflows should keep archive behaviour")
 	}
 }
 
