@@ -66,6 +66,7 @@ import {
 } from '@/api/flows';
 import { listAgents } from '@/api/agents';
 import { listDevices, type Device } from '@/api/devices';
+import { listEdges, type Edge as ManagedEdge } from '@/api/edges';
 import { useI18n } from '@/i18n/locale';
 import { useAuth } from '@/store/auth';
 import { toolGroupKey, groupTag, groupTitle, orderedGroupKeys } from '@/lib/toolSkill';
@@ -363,6 +364,7 @@ export default function FlowEditorPage() {
   // available agent personas, for the Agent node's persona dropdown.
   const [agentNames, setAgentNames] = useState<string[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
+  const [managedEdges, setManagedEdges] = useState<ManagedEdge[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -427,12 +429,16 @@ export default function FlowEditorPage() {
 
   useEffect(() => {
     let alive = true;
-    listDevices()
-      .then((r) => {
-        if (alive) setDevices(r.items ?? []);
+    Promise.all([listDevices(), listEdges()])
+      .then(([deviceResp, edgeResp]) => {
+        if (!alive) return;
+        setDevices(deviceResp.items ?? []);
+        setManagedEdges(edgeResp.items ?? []);
       })
       .catch(() => {
-        if (alive) setDevices([]);
+        if (!alive) return;
+        setDevices([]);
+        setManagedEdges([]);
       });
     return () => {
       alive = false;
@@ -810,7 +816,8 @@ export default function FlowEditorPage() {
                         <option value="">不指定设备</option>
                         {devices.map((device) => (
                           <option key={device.id} value={String(device.id)}>
-                            #{device.id} {device.name || device.hostname || '未命名设备'}{device.online ? ' · 在线' : ' · 离线'}
+                            资产 #{device.id} {device.name || device.hostname || '未命名设备'} · {device.online ? '在线' : '离线'}
+                            {managedEdges.filter((edge) => edge.device_id === device.id).map((edge) => ` · Edge #${edge.id} ${edge.name}`).join('')}
                           </option>
                         ))}
                       </select>

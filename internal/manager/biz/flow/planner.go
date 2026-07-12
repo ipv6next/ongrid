@@ -126,10 +126,18 @@ func normalizedReportMode(prompt, requested string) string {
 		return requested
 	}
 	lower := strings.ToLower(prompt)
+	if strings.Contains(prompt, "不生成报告") || strings.Contains(prompt, "无需报告") || strings.Contains(lower, "no report") {
+		return "none"
+	}
 	if strings.Contains(prompt, "网页") || strings.Contains(prompt, "HTML") || strings.Contains(lower, "web") || strings.Contains(lower, "html") {
 		return "web"
 	}
 	if strings.Contains(prompt, "报告") || strings.Contains(prompt, "RCA") || strings.Contains(lower, "report") {
+		return "archive"
+	}
+	// A diagnostic/patrol request should leave an auditable result by default.
+	// The operator can still choose "不生成报告" explicitly in the UI.
+	if isContainerIntent(prompt) || isPatrolIntent(prompt) || isAlertIntent(prompt) {
 		return "archive"
 	}
 	return "none"

@@ -43,6 +43,15 @@ func TestShouldArchiveWorkflowReport_RespectsPlannerMode(t *testing.T) {
 	}
 }
 
+func TestNormalizedReportMode_DiagnosticDefaultsToArchive(t *testing.T) {
+	if got := normalizedReportMode("检查 Docker 容器状态", "auto"); got != "archive" {
+		t.Fatalf("report mode = %q, want archive", got)
+	}
+	if got := normalizedReportMode("检查 Docker 容器状态，不生成报告", "auto"); got != "none" {
+		t.Fatalf("explicit no-report wording mode = %q, want none", got)
+	}
+}
+
 func TestPlanWorkflow_AlertUsesInvestigatorAndWebReport(t *testing.T) {
 	u := NewUsecase(nil, nil, nil, nil)
 	draft, err := u.PlanWorkflowWithOptions(context.Background(), "告警触发后自动调查", PlannerOptions{ReportMode: "web"})
